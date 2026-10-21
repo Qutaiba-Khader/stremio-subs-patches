@@ -1,0 +1,5 @@
+Stremio Subs Patches — GPLv3.
+
+The project layout (Gradle setup, extension module) started from tikkamasalla/stremio-morphe-patches (GPLv3),
+https://github.com/tikkamasalla/stremio-morphe-patches. The patch code itself is new.
+Side-by-side install uses Morphe's own "Clone app" patch from MorpheApp/morphe-patches (GPLv3), applied at patch time.
