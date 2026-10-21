@@ -19,11 +19,14 @@ How it works (protocol 1, see the comment at the top of `SubtitleRefresh.java`):
 3. On `replace`, the patch downloads the file once (same origin only, at most 8 MB) and draws its lines itself on
    Stremio's own `SubtitleView`, following the player's position, pause, seek, speed and Stremio's subtitle delay.
    The video, the track list and the selection are never touched.
-4. For any other selected subtitle the patch asks the addon once, `GET <base>/patch/v1/subtitle?v=1&src=…`; an addon
-   with nothing better answers `stop`. This is where later behaviour (for example a re-timed copy) can come from,
-   with no new patch.
-5. One small report per play goes to `POST <base>/patch/v1/report` (patch and Stremio versions, hooks seen, swaps,
-   entries still waiting, failures).
+4. For any other selected subtitle of the same addon (same origin) the patch asks it once,
+   `GET <base>/patch/v1/subtitle?v=1&src=…`; an addon with nothing better answers `stop`. This is where later behaviour
+   (for example a re-timed copy) can come from, with no new patch. An addon is never told another addon's addresses.
+5. One small report per play goes to `POST <base>/patch/v1/report` of the addon that was asked (patch and Stremio
+   versions, hooks seen, swaps, entries still waiting, failures; no paths in its error text).
+
+Leaving the video ends its questions at once (an open request is closed, nothing queued is sent). An addon's `stop`,
+an unknown job (a JSON 404) and a 45-minute limit hold for the rest of the play.
 
 Picking another subtitle or turning subtitles off hands the screen back to Stremio at once; picking our entry again in
 the same play uses the file already downloaded. A watchdog and error handling hand the screen back on any problem.

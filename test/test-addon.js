@@ -5,7 +5,8 @@
 // READY2_S / READY3_S seconds after the subtitle list was asked for, then a file whose every line names its own start
 // time, so a screenshot shows whether the drawn line matches the video clock.
 //   node test-addon.js            (VIDEO=path/to/patchtest.mp4 PORT=7790 BASE=http://127.0.0.1:7790)
-// GET /sub/<job>/<k>.state answers like the addon's light "ready?" route; NO_STATE=1 makes it 404 (older addon).
+// GET /sub/<job>/<k>.state answers like the addon's light "ready?" route; NO_STATE=1 makes it a bare 404 and
+// NO_STATE=json a JSON 404 (both: an older addon without the route).
 const http = require('node:http');
 const fs = require('node:fs');
 
@@ -70,6 +71,8 @@ http.createServer((req, res) => {
         const ready = isReady(job, k);
         if (kind === 'state') {
             if (process.env.NO_STATE === '1') { res.writeHead(404); return res.end(); }
+            // an addon from before the question route: its catch-all answers every unknown route with a JSON 404
+            if (process.env.NO_STATE === 'json') { res.writeHead(404, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'Not found', path: p })); }
             res.setHeader('Cache-Control', 'no-store');
             // like the addon: held open up to wait= s (≤ 25) until the file is ready
             const until = Date.now() + Math.min(25, Number(url.searchParams.get('wait')) || 0) * 1000;

@@ -65,8 +65,8 @@ import java.util.regex.Pattern;
  * - GET <origin><path>?v=1&wait=25&src=<subtitle address> answers JSON:
  *   {"op":"wait"|"replace"|"stop", "file": "<path on the same origin>", "retryMs": n, "toast": "text"}
  *   (older answers {"ready", "enabled"} are understood too). "wait" may be held open by the server up to `wait` s.
- * - GET <base>/patch/v1/subtitle?v=1&src=<address> — the same answer for any other selected subtitle (also one
- *   from another addon, asked of the last addon that used the protocol), once per selection; "stop" = nothing better.
+ * - GET <base>/patch/v1/subtitle?v=1&src=<address> — the same answer for any other selected subtitle of the same
+ *   addon (same origin: an addon is never told another addon's addresses), once per play; "stop" = nothing better.
  * - POST <base>/patch/v1/report — one small JSON report per play (versions, hooks seen, swaps, last error).
  * Nothing but subtitle lines and a short toast can come back: files only from the same origin, at most 8 MB, plain
  * text only.
@@ -76,13 +76,15 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.2.0";
+    static final String PATCH_VERSION = "0.2.1";
     private static final int PROTOCOL = 1;
 
     private static final Pattern OUR_PATH = Pattern.compile("/sub/[^/]+/\\d+\\.srt$");
-    /** The processing file's visible line, for an addon that sends no tag. */
+    /** The processing file's visible line, for an addon that sends no tag: both parts must be there. */
     private static final String MARK_EN = "processing";
+    private static final String MARK_EN_2 = "pick it again";
     private static final String MARK_AR = "قيد المعالجة";
+    private static final String MARK_AR_2 = "اخترها";
     private static final String TOAST = "الترجمة جاهزة"; // الترجمة جاهزة
 
     private static final int WAIT_S = 25;
@@ -117,8 +119,12 @@ public final class SubtitleRefresh {
         final Map<String, Ask> asks = new HashMap<>();
         /** Replacements already downloaded, by subtitle address. */
         final Map<String, Line[]> files = new HashMap<>();
-        /** Subtitle addresses whose generic question was answered "stop" in this play. */
+        /** Subtitle addresses whose generic question was answered "stop" (or failed) in this play. */
         final Set<String> settled = new HashSet<>();
+        /** Subtitle addresses the addon said "stop" for, or that we gave up on: not asked again in this play. */
+        final Set<String> stopped = new HashSet<>();
+        /** Where this play's report goes: the addon whose question was asked (null = no report). */
+        String reportBase;
 
         /** Drawing: the lines we draw instead of Stremio's, for `drawingFor` (null = Stremio draws). */
         Line[] drawing;
@@ -151,17 +157,25 @@ public final class SubtitleRefresh {
         final String origin;
         String path;
         final boolean generic;
+        /** The addon's base (for the report). */
+        final String base;
         final long startedAt = SystemClock.elapsedRealtime();
         long errorDelay = RETRY_MS;
         boolean placeholderSeen;
         boolean busy;
-        long readyAt;
+        /** The one scheduled next question (null = none): a new schedule always replaces it. */
+        Runnable pending;
+        /** Set when the play ends: the background thread sends nothing more for this question. */
+        volatile boolean cancelled;
+        /** The open connection while a question or a file is on the way, so the end of the play can close it. */
+        volatile HttpURLConnection conn;
 
-        Ask(String address, String origin, String path, boolean generic) {
+        Ask(String address, String origin, String path, boolean generic, String base) {
             this.address = address;
             this.origin = origin;
             this.path = path;
             this.generic = generic;
+            this.base = base;
         }
     }
 
@@ -181,8 +195,13 @@ public final class SubtitleRefresh {
             Session old = session;
             Player oldPlayer = old != null ? old.player.get() : null;
             if (player != null && player == oldPlayer) return;
-            if (old != null) endSession(old, "player " + (player == null ? "detached" : "replaced"));
-            if (player == null) return;
+            if (player == null) {
+                // only the play's own view (or a view that is gone) ends it: another PlayerView being emptied does not
+                View oldView = old != null ? old.playerView.get() : null;
+                if (old != null && (oldView == null || oldView == playerView)) endSession(old, "player detached");
+                return;
+            }
+            if (old != null) endSession(old, "player replaced");
             if (prefs == null && playerView != null) {
                 prefs = playerView.getContext().getApplicationContext().getSharedPreferences("subsense_refresh", Context.MODE_PRIVATE);
             }
@@ -205,7 +224,7 @@ public final class SubtitleRefresh {
         if (s == null) return cues;
         try {
             s.subtitleView = new WeakReference<>(subtitleView);
-            s.report.hookCues = true;
+            if (cues != null && !cues.isEmpty()) s.report.hookCues = true; // not Media3's own clearing call
             s.lastStremio = cues != null ? cues : Collections.emptyList();
             if (s.drawing != null) return s.shown; // ours are drawn: Stremio's copy stays hidden
             if (s.selected == null) evaluateSelection(s);
@@ -214,9 +233,16 @@ public final class SubtitleRefresh {
                 String tagPath = tagIn(cues);
                 Ask a = s.asks.get(sel.address);
                 if (tagPath != null || isPlaceholderText(cues)) {
+                    Line[] have = s.files.get(sel.address);
+                    if (have != null) { // already downloaded in this play (e.g. drawing was handed back): draw it again
+                        startDrawing(s, sel.address, have, null);
+                        return s.drawing != null ? s.shown : cues; // if drawing failed at once, Stremio's own cues stay
+                    }
+                    if (s.stopped.contains(sel.address)) return cues; // the addon said stop, or we gave up
                     if (a == null || a.generic) {
                         String path = tagPath != null ? tagPath : statePathFor(sel.address);
-                        if (path != null) startAsking(s, new Ask(sel.address, originOf(sel.address), path, false));
+                        String origin = originOf(sel.address);
+                        if (path != null) startAsking(s, new Ask(sel.address, origin, path, false, baseOf(origin, path)));
                     } else if (tagPath != null && !tagPath.equals(a.path)) {
                         a.path = tagPath;
                     }
@@ -224,7 +250,8 @@ public final class SubtitleRefresh {
                     if (now != null && !now.placeholderSeen) {
                         now.placeholderSeen = true;
                         s.report.placeholders++;
-                        rememberBase(baseOf(now.origin, now.path));
+                        if (now.base != null) s.reportBase = now.base;
+                        rememberBase(now.base);
                         log("processing line on screen for " + sel.address + (tagPath != null ? " (tag " + tagPath + ")" : ""));
                     }
                 }
@@ -299,15 +326,18 @@ public final class SubtitleRefresh {
             poll(s, a);
             return;
         }
-        // any other subtitle: ask the addon that uses this protocol whether it has something better (once per play)
-        if (statePathFor(now.address) == null && !s.settled.contains(now.address)) {
-            String base = rememberedBase();
-            if (base != null) startAsking(s, new Ask(now.address, originOf(base), pathOf(base) + "/patch/v1/subtitle", true));
-        } else if (statePathFor(now.address) != null && !s.settled.contains(now.address)) {
+        if (s.settled.contains(now.address) || s.stopped.contains(now.address)) return;
+        String origin = originOf(now.address);
+        String base;
+        if (statePathFor(now.address) != null) {
             // one of ours that is not (yet) known to be a placeholder: one generic question, the addon decides
-            String base = baseOf(originOf(now.address), Uri.parse(now.address).getPath());
-            if (base != null) startAsking(s, new Ask(now.address, originOf(base), pathOf(base) + "/patch/v1/subtitle", true));
+            base = baseOf(origin, Uri.parse(now.address).getEncodedPath());
+        } else {
+            // another subtitle: asked only of the addon that served it (same origin), never of another addon
+            base = rememberedBase();
+            if (base != null && (origin == null || !origin.equals(originOf(base)))) base = null;
         }
+        if (base != null) startAsking(s, new Ask(now.address, originOf(base), pathOf(base) + "/patch/v1/subtitle", true, base));
     }
 
     /** The selected text track when it is a side-loaded subtitle, with the addon's own address. */
@@ -359,7 +389,7 @@ public final class SubtitleRefresh {
     /** /sub/<id>/<k>.srt → /sub/<id>/<k>.state (the addon's own route), else null. */
     static String statePathFor(String address) {
         Uri u = Uri.parse(address);
-        String path = u.getPath();
+        String path = u.getEncodedPath(); // used in an address again: kept encoded
         if (path == null || !OUR_PATH.matcher(path).find()) return null;
         return path.substring(0, path.length() - ".srt".length()) + ".state";
     }
@@ -394,11 +424,14 @@ public final class SubtitleRefresh {
     private static boolean isPlaceholderText(List<Cue> cues) {
         if (cues == null) return false;
         for (Cue c : cues) {
-            if (c == null || c.text == null) continue;
-            String s = c.text.toString();
-            if (s.contains(MARK_AR) || s.contains(MARK_EN)) return true;
+            if (c != null && c.text != null && isPlaceholderLine(c.text.toString())) return true;
         }
         return false;
+    }
+
+    /** The processing line itself, not a subtitle line that merely says "processing" / "قيد المعالجة". */
+    private static boolean isPlaceholderLine(String s) {
+        return (s.contains(MARK_AR) && s.contains(MARK_AR_2)) || (s.contains(MARK_EN) && s.contains(MARK_EN_2));
     }
 
     // ---------------------------------------------------------------- asking the addon
@@ -407,6 +440,7 @@ public final class SubtitleRefresh {
         if (a.origin == null) return;
         Ask old = s.asks.get(a.address);
         if (old != null && !old.generic && a.generic) return;
+        if (old != null) cancel(old); // the placeholder's question takes over from the generic one
         s.asks.put(a.address, a);
         log((a.generic ? "asking " : "waiting for ") + a.address + " via " + a.origin + a.path);
         poll(s, a);
@@ -414,26 +448,58 @@ public final class SubtitleRefresh {
 
     private static void poll(Session s, Ask a) {
         if (s != session || s.asks.get(a.address) != a) return;
+        if (a.pending != null) { // asked now: the scheduled question is not needed any more
+            MAIN.removeCallbacks(a.pending);
+            a.pending = null;
+        }
         if (s.selected == null || !a.address.equals(s.selected.address)) return; // asked again when selected again
         if (SystemClock.elapsedRealtime() - a.startedAt > GIVE_UP_MS) {
             s.asks.remove(a.address);
-            s.report.event("gave up waiting for " + a.address);
+            s.stopped.add(a.address);
+            s.report.event("gave up waiting for " + slotOf(a.address));
             return;
         }
         if (a.busy) return;
         a.busy = true;
         final int gen = s.gen;
         NET.execute(() -> {
+            if (a.cancelled) return; // the play ended while this question waited for a thread
             Answer r;
+            long t0 = SystemClock.elapsedRealtime();
             try {
                 r = ask(a);
             } catch (Throwable t) {
                 r = new Answer();
                 r.error = String.valueOf(t);
             }
+            if (a.cancelled) return;
+            r.tookMs = SystemClock.elapsedRealtime() - t0;
             final Answer answer = r;
             MAIN.post(() -> onAnswer(gen, a, answer));
         });
+    }
+
+    /** The next question for `a` in `delayMs`; replaces any question already scheduled, holds no play's state. */
+    private static void pollLater(Session s, Ask a, long delayMs) {
+        if (a.pending != null) MAIN.removeCallbacks(a.pending);
+        final int gen = s.gen;
+        a.pending = () -> {
+            a.pending = null;
+            Session now = session;
+            if (now != null && now.gen == gen) poll(now, a);
+        };
+        MAIN.postDelayed(a.pending, delayMs);
+    }
+
+    /** The play ended or the question was replaced: nothing more is sent for it, and an open request is closed. */
+    private static void cancel(Ask a) {
+        a.cancelled = true;
+        if (a.pending != null) {
+            MAIN.removeCallbacks(a.pending);
+            a.pending = null;
+        }
+        final HttpURLConnection c = a.conn;
+        if (c != null) new Thread(c::disconnect, "SubsRefresh-close").start(); // closing may touch the network
     }
 
     private static void onAnswer(int gen, Ask a, Answer r) {
@@ -443,30 +509,43 @@ public final class SubtitleRefresh {
         try {
             if (r.error != null) {
                 s.report.lastError = r.error;
+                s.report.lastErrorOrigin = a.origin;
                 log("question failed: " + r.error);
-                MAIN.postDelayed(() -> poll(s, a), a.errorDelay);
+                if (a.generic) { // a generic question is asked once per play
+                    s.asks.remove(a.address);
+                    s.settled.add(a.address);
+                    return;
+                }
+                pollLater(s, a, a.errorDelay);
                 a.errorDelay = Math.min(ERROR_RETRY_MAX_MS, a.errorDelay * 2);
                 return;
             }
             a.errorDelay = RETRY_MS;
             if ("stop".equals(r.op)) {
                 s.asks.remove(a.address);
-                s.settled.add(a.address);
-                if (!a.generic) log("the addon says stop for " + a.address);
+                if (a.generic) {
+                    s.settled.add(a.address);
+                } else {
+                    s.stopped.add(a.address);
+                    log("the addon says stop for " + a.address);
+                }
                 return;
             }
             if ("replace".equals(r.op) && r.lines != null) {
                 s.asks.remove(a.address);
                 s.files.put(a.address, r.lines);
-                if (a.readyAt == 0) a.readyAt = SystemClock.elapsedRealtime();
                 log("replacement ready: " + r.lines.length + " lines for " + a.address);
                 if (s.selected != null && a.address.equals(s.selected.address)) {
                     startDrawing(s, a.address, r.lines, r.toast != null ? r.toast : (a.generic ? null : TOAST));
-                    s.report.swap(a, SystemClock.elapsedRealtime() - a.readyAt);
+                    s.report.swap(a, SystemClock.elapsedRealtime() - r.repliedAt);
+                    if (a.base != null) s.reportBase = a.base;
                 }
                 return;
             }
-            MAIN.postDelayed(() -> poll(s, a), Math.max(0, r.retryMs));
+            // an answer that was not held (an addon without the long wait): never ask faster than RETRY_MS
+            long delay = Math.max(0, r.retryMs);
+            if (r.tookMs < 5000) delay = Math.max(delay, RETRY_MS);
+            pollLater(s, a, delay);
         } catch (Throwable t) {
             fail("onAnswer", t);
         }
@@ -478,6 +557,10 @@ public final class SubtitleRefresh {
         Line[] lines;
         String toast;
         String error;
+        /** How long the question took (a held question takes long). */
+        long tookMs;
+        /** When the addon said the file is ready. */
+        long repliedAt;
     }
 
     /** Background thread: one question, and the file when the answer is "replace". */
@@ -485,15 +568,20 @@ public final class SubtitleRefresh {
         Answer r = new Answer();
         String q = a.origin + a.path + (a.path.contains("?") ? "&" : "?") + "v=" + PROTOCOL + "&wait=" + (a.generic ? 0 : WAIT_S)
                 + "&src=" + URLEncoder.encode(a.address, "UTF-8");
-        Response st = http("GET", q, null, a.generic ? TIMEOUT_MS : (WAIT_S + 15) * 1000);
+        Response st = http("GET", q, null, a.generic ? TIMEOUT_MS : (WAIT_S + 15) * 1000, a);
+        if (st.code == 404 && !a.generic && isProtocolStop(st)) {
+            r.op = "stop"; // the addon answered: it does not know this subtitle (e.g. it restarted and forgot the job)
+            return r;
+        }
         if (st.code == 404 && !a.generic && a.path.endsWith(".state")) {
             // an addon without the question route: ask for the file itself and read its processing header
-            Response f = http("GET", withQuery(a.address, "via=refresh"), null, TIMEOUT_MS);
+            Response f = http("GET", withQuery(a.address, "via=refresh"), null, TIMEOUT_MS, a);
             if (f.code == 200 && !f.processing) {
                 Line[] lines = parseSrt(new String(f.body, StandardCharsets.UTF_8));
                 if (lines.length > 0 && !hasPlaceholderLine(lines)) {
                     r.op = "replace";
                     r.lines = lines;
+                    r.repliedAt = SystemClock.elapsedRealtime();
                     return r;
                 }
             }
@@ -505,9 +593,10 @@ public final class SubtitleRefresh {
             return r;
         }
         if (st.code != 200) {
-            r.error = "HTTP " + st.code + " from " + a.path;
+            r.error = "HTTP " + st.code + (a.generic ? " from the subtitle question" : " from the ready question");
             return r;
         }
+        r.repliedAt = SystemClock.elapsedRealtime();
         JSONObject j = new JSONObject(new String(st.body, StandardCharsets.UTF_8));
         String op = j.optString("op", "");
         if (op.isEmpty()) { // the first protocol's answer: {ready, enabled}
@@ -525,25 +614,39 @@ public final class SubtitleRefresh {
             r.error = "a file on another origin was refused";
             return r;
         }
-        Response f = http("GET", withQuery(fileUrl, "via=refresh"), null, TIMEOUT_MS);
+        if (a.cancelled) return r;
+        Response f = http("GET", withQuery(fileUrl, "via=refresh"), null, TIMEOUT_MS, a);
+        // "replace" but the file is not usable yet: asked again with the error back-off, never at the addon's pace
         if (f.code != 200 || f.processing) {
             r.op = "wait";
-            if (f.code != 200) r.error = "file HTTP " + f.code;
+            r.error = f.code != 200 ? "file HTTP " + f.code : "the file is still marked processing";
             return r;
         }
         Line[] lines = parseSrt(new String(f.body, StandardCharsets.UTF_8));
         if (lines.length == 0 || hasPlaceholderLine(lines)) {
             r.op = "wait";
+            r.error = lines.length == 0 ? "the file has no subtitle lines" : "the file is still the processing file";
             return r;
         }
         r.lines = lines;
         return r;
     }
 
+    /** A 404 that is the protocol's own "stop" ({"subsense":1, "op":"stop"}); any other 404 is an addon without the route. */
+    private static boolean isProtocolStop(Response st) {
+        if (!st.json || st.body.length == 0) return false;
+        try {
+            JSONObject j = new JSONObject(new String(st.body, StandardCharsets.UTF_8));
+            return j.has("subsense") && "stop".equals(j.optString("op"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static boolean hasPlaceholderLine(Line[] lines) {
         for (Line l : lines) {
             String s = l.text.toString();
-            if (s.contains(MARK_AR) || decodeTag(s) != null) return true;
+            if (isPlaceholderLine(s) || decodeTag(s) != null) return true;
         }
         return false;
     }
@@ -552,10 +655,19 @@ public final class SubtitleRefresh {
         int code;
         byte[] body = new byte[0];
         boolean processing;
+        boolean json;
     }
 
-    private static Response http(String method, String address, byte[] body, int readTimeoutMs) throws Exception {
+    /** One request; `owner` (may be null) holds the open connection so that the end of the play can close it. */
+    private static Response http(String method, String address, byte[] body, int readTimeoutMs, Ask owner) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(address).openConnection();
+        if (owner != null) {
+            owner.conn = conn;
+            if (owner.cancelled) {
+                owner.conn = null;
+                throw new java.io.IOException("the play ended");
+            }
+        }
         conn.setConnectTimeout(TIMEOUT_MS);
         conn.setReadTimeout(readTimeoutMs);
         conn.setUseCaches(false);
@@ -571,25 +683,46 @@ public final class SubtitleRefresh {
             }
         }
         try {
+            if (owner != null) {
+                // a close() before the connection existed did nothing: connect, then look again
+                conn.connect();
+                if (owner.cancelled) throw new java.io.IOException("the play ended");
+            }
             Response r = new Response();
             r.code = conn.getResponseCode();
             r.processing = conn.getHeaderField("X-Addon-Processing") != null;
+            String type = conn.getContentType();
+            r.json = type != null && type.contains("json");
             if (r.code == 200) {
                 try (InputStream in = conn.getInputStream()) {
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    byte[] buf = new byte[16384];
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                        if (out.size() > MAX_FILE) throw new IllegalStateException("answer over 8 MB");
+                    r.body = readAll(in, MAX_FILE);
+                }
+            } else if (r.code == 404 && r.json) { // may be the protocol's own "stop" (read a little only)
+                InputStream err = conn.getErrorStream();
+                if (err != null) {
+                    try (InputStream in = err) {
+                        r.body = readAll(in, 4096);
+                    } catch (Throwable ignored) {
+                        // not a stop then
                     }
-                    r.body = out.toByteArray();
                 }
             }
             return r;
         } finally {
+            if (owner != null) owner.conn = null;
             conn.disconnect();
         }
+    }
+
+    private static byte[] readAll(InputStream in, int max) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            out.write(buf, 0, n);
+            if (out.size() > max) throw new IllegalStateException("answer over " + max + " bytes");
+        }
+        return out.toByteArray();
     }
 
     static String originOf(String address) {
@@ -617,6 +750,12 @@ public final class SubtitleRefresh {
         if (origin == null || path == null) return null;
         int i = path.indexOf("/sub/");
         return i >= 0 ? origin + path.substring(0, i) : null;
+    }
+
+    /** "<id>:<k>" for one of the addon's entries, else "another subtitle": a report never carries an address. */
+    static String slotOf(String address) {
+        Matcher m = Pattern.compile("/sub/([^/?#]+)/(\\d+)\\.srt").matcher(address == null ? "" : address);
+        return m.find() ? m.group(1) + ":" + m.group(2) : "another subtitle";
     }
 
     private static String pathOf(String address) {
@@ -699,9 +838,8 @@ public final class SubtitleRefresh {
         }
         if (spanStart >= 0 && text.length() > spanStart) {
             text.setSpan(new StyleSpan(Typeface.ITALIC), spanStart, text.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            return true;
         }
-        return false;
+        return spanStart >= 0; // an <i> opened at the end of a line carries on to the next one
     }
 
     private static long ms(Matcher m, int g) {
@@ -725,7 +863,10 @@ public final class SubtitleRefresh {
             s.swappedAt = SystemClock.elapsedRealtime();
             log("swapped at " + (p != null ? p.getCurrentPosition() : -1) + " ms, text delay " + textDelayMs(s) + " ms");
             View v = s.playerView.get();
-            if (v != null) Toast.makeText(v.getContext(), toast, Toast.LENGTH_LONG).show();
+            // only over the player itself: never over another app when Stremio is in the background
+            if (v != null && v.isAttachedToWindow() && v.getWindowVisibility() == View.VISIBLE) {
+                Toast.makeText(v.getContext(), toast, Toast.LENGTH_LONG).show();
+            }
         }
         tick(s);
         MAIN.removeCallbacks(WATCHDOG);
@@ -742,6 +883,7 @@ public final class SubtitleRefresh {
         draw(s, s.lastStremio);
         if (failure) {
             s.report.lastError = why;
+            s.report.lastErrorOrigin = null; // the drawing: no addon's business but harmless to any
             s.report.releases++;
         }
         log("Stremio draws again: " + why);
@@ -781,7 +923,7 @@ public final class SubtitleRefresh {
             }
             if (i + 1 < lines.length) next = Math.min(next, lines[i + 1].start);
             if (!sameText(now, s.shown)) draw(s, now);
-            s.lastTickAt = SystemClock.elapsedRealtime();
+            s.lastTickAt = SystemClock.uptimeMillis(); // the Handler's own clock: it stops while the device sleeps
             long wait;
             if (p.isPlaying()) {
                 float speed = p.getPlaybackParameters().speed;
@@ -801,7 +943,7 @@ public final class SubtitleRefresh {
     private static void watchdog() {
         Session s = session;
         if (s == null || s.drawing == null) return;
-        long late = SystemClock.elapsedRealtime() - s.lastTickAt;
+        long late = SystemClock.uptimeMillis() - s.lastTickAt;
         if (late > 5000) {
             release(s, "the drawing stalled for " + late + " ms", true);
             return;
@@ -901,6 +1043,8 @@ public final class SubtitleRefresh {
         int releases;
         int bufferingAfterSwap;
         String lastError;
+        /** The addon the last error came from (null = the drawing). */
+        String lastErrorOrigin;
         final JSONArray swaps = new JSONArray();
         final List<String> events = new ArrayList<>();
 
@@ -921,6 +1065,7 @@ public final class SubtitleRefresh {
 
     private static void endSession(Session s, String why) {
         release(s, why, false);
+        for (Ask a : s.asks.values()) cancel(a); // nothing more is asked for a play that ended
         Player p = s.player.get();
         if (p != null) {
             try {
@@ -937,27 +1082,33 @@ public final class SubtitleRefresh {
 
     /** One report per play that involved the protocol, to the addon that used it. Best effort, never retried. */
     private static void sendReport(Session s) {
-        String base = null;
-        for (Ask a : s.asks.values()) if (!a.generic) base = baseOf(a.origin, a.path);
-        if (base == null && (s.report.placeholders > 0 || s.report.swaps.length() > 0)) base = rememberedBase();
+        String base = s.reportBase; // only the addon this play asked: a report never goes to another addon
         if (base == null) return;
         JSONArray waiting = new JSONArray();
-        for (Ask a : s.asks.values()) if (!a.generic && a.placeholderSeen) waiting.put(a.address);
+        // only what concerns the addon receiving the report: never another addon's addresses or errors
+        String own = originOf(base);
+        for (Ask a : s.asks.values()) if (!a.generic && a.placeholderSeen && own != null && own.equals(a.origin)) waiting.put(a.address);
+        JSONArray swaps = new JSONArray();
+        for (int i = 0; i < s.report.swaps.length(); i++) {
+            JSONObject x = s.report.swaps.optJSONObject(i);
+            if (x != null && own != null && own.equals(originOf(x.optString("src")))) swaps.put(x);
+        }
+        String lastError = s.report.lastErrorOrigin == null || s.report.lastErrorOrigin.equals(own) ? s.report.lastError : null;
         try {
             JSONObject j = new JSONObject()
                     .put("v", PROTOCOL).put("patch", PATCH_VERSION).put("stremio", s.report.stremio)
                     .put("hooks", new JSONObject().put("player", s.report.hookPlayer).put("cues", s.report.hookCues)
                             .put("delay", s.report.delayReadable == null ? JSONObject.NULL : s.report.delayReadable))
-                    .put("placeholders", s.report.placeholders).put("swaps", s.report.swaps)
+                    .put("placeholders", s.report.placeholders).put("swaps", swaps)
                     .put("waiting", waiting).put("releases", s.report.releases)
                     .put("bufferingAfterSwap", s.report.bufferingAfterSwap)
-                    .put("lastError", s.report.lastError == null ? JSONObject.NULL : s.report.lastError)
+                    .put("lastError", lastError == null ? JSONObject.NULL : lastError)
                     .put("events", new JSONArray(s.report.events));
             final byte[] body = j.toString().getBytes(StandardCharsets.UTF_8);
             final String url = base + "/patch/v1/report";
             NET.execute(() -> {
                 try {
-                    http("POST", url, body, TIMEOUT_MS);
+                    http("POST", url, body, TIMEOUT_MS, null);
                 } catch (Throwable ignored) {
                     // best effort
                 }
