@@ -56,7 +56,7 @@ is ignored and everything else keeps working. Addon subtitles reach the player t
 ## Ready-made APKs
 
 [morphe-builder](https://github.com/Qutaiba-Khader/morphe-builder/releases) publishes two Android TV APKs with each
-release of these patches (and each new Stremio version), both arm64-v8a:
+release of these patches (and each new Stremio version), both armeabi-v7a (32-bit, which also runs on 64-bit devices):
 
 - `stremio-tv-replacement-subs-…apk` replaces the original: same package `com.stremio.one`, same name "Stremio". It is
   signed with the builder's own key, not Stremio's, so uninstall the original Stremio once before installing it.
