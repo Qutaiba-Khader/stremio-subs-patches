@@ -21,8 +21,11 @@ const pad = (n, w = 2) => String(n).padStart(w, '0');
 const srtTime = (ms) => `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${pad(ms % 1000, 3)}`;
 const DIGIT = ['', '١', '٢', '٣'];
 
-function placeholder(k) { // results.js placeholderText/placeholderCues, verbatim
-    const text = `ai subtitle ${k} processing — pick it again in ~2 min\nالترجمة ${DIGIT[k] || k} قيد المعالجة — اخترها مرة أخرى بعد دقيقتين تقريباً`;
+// the invisible tag the addon puts in its processing file: "ssx1 <path>" in Unicode tag characters (NO_TAG=1: none)
+const tagFor = (path) => (process.env.NO_TAG === '1' ? '' : Array.from(`ssx1 ${path}`, (c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join(''));
+
+function placeholder(job, k) { // results.js placeholderText/placeholderCues, verbatim
+    const text = `ai subtitle ${k} processing — pick it again in ~2 min\nالترجمة ${DIGIT[k] || k} قيد المعالجة — اخترها مرة أخرى بعد دقيقتين تقريباً${tagFor(`/sub/${job}/${k}.state`)}`;
     const out = [];
     for (let t = 0, i = 1; t < 4 * 3600 * 1000; t += 60000, i++) out.push(`${i}\n${srtTime(t)} --> ${srtTime(t + 59500)}\n${text}\n`);
     return out.join('\n');
@@ -68,14 +71,28 @@ http.createServer((req, res) => {
         if (kind === 'state') {
             if (process.env.NO_STATE === '1') { res.writeHead(404); return res.end(); }
             res.setHeader('Cache-Control', 'no-store');
-            return json(res, { subsense: 1, ready, enabled: ENABLED });
+            // like the addon: held open up to wait= s (≤ 25) until the file is ready
+            const until = Date.now() + Math.min(25, Number(url.searchParams.get('wait')) || 0) * 1000;
+            const answer = () => {
+                const r = isReady(job, k);
+                if (!r && ENABLED && Date.now() < until && !res.destroyed) return setTimeout(answer, 500);
+                log(`  → state ${k}: ${r ? 'ready' : 'not ready'}`);
+                return json(res, { subsense: 1, v: 1, op: !ENABLED ? 'stop' : r ? 'replace' : 'wait', ready: r, enabled: ENABLED, ...(r ? { file: `/sub/${job}/${k}.srt` } : {}), retryMs: 1000 });
+            };
+            return answer();
         }
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
         res.setHeader('Cache-Control', ready ? 'max-age=3600' : 'no-store');
         if (!ready) res.setHeader('X-Addon-Processing', '1');
         log(`  → entry ${k}: ${ready ? 'FINISHED file' : 'processing file'}`);
-        return res.end(ready ? finished(k) : placeholder(k));
+        return res.end(ready ? finished(k) : placeholder(job, k));
+    }
+    if (p === '/patch/v1/subtitle') return json(res, { v: 1, op: 'stop' });
+    if (p === '/patch/v1/report' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (d) => { body += d; });
+        return req.on('end', () => { log(`  REPORT ${body}`); json(res, { ok: true }); });
     }
     if (p === '/video.mp4') {
         const size = fs.statSync(VIDEO).size;

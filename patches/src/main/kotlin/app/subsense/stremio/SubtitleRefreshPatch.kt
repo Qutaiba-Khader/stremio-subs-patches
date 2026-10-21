@@ -16,7 +16,9 @@ val STREMIO_TV = Compatibility(
     packageName = "com.stremio.one",
     apkFileType = ApkFileType.APK,
     appIconColor = 0x5B67F1,
-    targets = listOf(AppTarget(version = "1.11.3", description = "Stremio for Android TV 1.11.3")),
+    // Tested on 1.11.3; the hooks are Media3 library methods, so later releases are accepted and checked when patching
+    // (a release where a hook no longer matches fails the patch instead of shipping a broken app).
+    targets = listOf(AppTarget(version = null, description = "Stremio for Android TV (tested: 1.11.3)")),
 )
 
 /**

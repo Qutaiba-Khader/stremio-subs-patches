@@ -7,29 +7,31 @@ entries can still be "processing" when they are picked.
 ## Subtitle auto-refresh
 
 Stremio's ExoPlayer keeps the first file it loaded for each subtitle entry for the whole play. An addon entry that was
-still "processing" when it was picked therefore keeps showing the processing line. With this patch, when one of our
-entries is selected and its processing line is on screen:
+still "processing" when it was picked therefore keeps showing its processing line. With this patch the addon can replace
+the subtitle that is playing, with no reload and nothing for the viewer to do; a toast says so.
 
-1. the patch asks the addon every 5 s whether the entry is ready (`GET …/sub/<job>/<k>.state`, read only on the
-   addon side; without that route it asks for the file itself every 15 s and reads the `X-Addon-Processing` header);
-2. once ready, it downloads the finished file once and draws its lines itself on Stremio's own `SubtitleView`,
-   following the player's position, pause, seek, speed and Stremio's subtitle delay;
-3. a toast says the subtitle is ready. The video, the track list and the selection are never touched: nothing reloads.
+How it works (protocol 1, see the comment at the top of `SubtitleRefresh.java`):
 
-Picking another subtitle hands drawing back to Stremio; picking our entry again in the same play uses the file already
-downloaded. Any error makes the patch step aside. The addon can turn the behaviour off: its `.state` answer carries
-`enabled`.
+1. The addon's processing file names its "ready?" question in an invisible tag (`ssx1 <path>`, written in Unicode tag
+   characters, which are never drawn). Without a tag, an address ending in `/sub/<id>/<k>.srt` asks `/sub/<id>/<k>.state`.
+2. The patch asks `GET <path>?v=1&wait=25&src=…`; the addon holds the answer until the file is ready (or 25 s) and
+   answers `{"op": "wait" | "replace" | "stop", "file": "<path>", "toast": "…"}`.
+3. On `replace`, the patch downloads the file once (same origin only, at most 8 MB) and draws its lines itself on
+   Stremio's own `SubtitleView`, following the player's position, pause, seek, speed and Stremio's subtitle delay.
+   The video, the track list and the selection are never touched.
+4. For any other selected subtitle the patch asks the addon once, `GET <base>/patch/v1/subtitle?v=1&src=…`; an addon
+   with nothing better answers `stop`. This is where later behaviour (for example a re-timed copy) can come from,
+   with no new patch.
+5. One small report per play goes to `POST <base>/patch/v1/report` (patch and Stremio versions, hooks seen, swaps,
+   entries still waiting, failures).
 
-Addon side, for any addon that wants this: entries at `…/sub/<id>/<k>.srt`; a not-ready entry served as a file whose
-lines say "processing" (and, ideally, the header `X-Addon-Processing: 1`); and
-`GET …/sub/<id>/<k>.state` → `{"ready": true|false, "enabled": true|false}`.
+Picking another subtitle or turning subtitles off hands the screen back to Stremio at once; picking our entry again in
+the same play uses the file already downloaded. A watchdog and error handling hand the screen back on any problem.
 
-Hooks: only Media3 library classes — `PlayerView.setPlayer` (to get the player) and `SubtitleView.setCues` (every line
-on its way to the screen). Stremio's own code is only *read*: the subtitle delay, through reflection on its text
-renderer (`getRenderOffsetMs`); if that ever moves, the delay is ignored and everything else keeps working.
-
-Addon subtitles reach the player through Stremio's local streaming server
-(`http://127.0.0.1:11470/subtitles.srt?from=<addon url>`); the patch reads our address from the `from` value.
+Hooks: only Media3 library classes — `PlayerView.setPlayer` and `SubtitleView.setCues`. Stremio's own code is only
+*read*: the subtitle delay, through reflection on its text renderer (`getRenderOffsetMs`); if that ever moves, the delay
+is ignored and everything else keeps working. Addon subtitles reach the player through Stremio's local streaming server
+(`http://127.0.0.1:11470/subtitles.srt?from=<addon url>`); the patch reads the addon's address from that.
 
 ## Test build
 
