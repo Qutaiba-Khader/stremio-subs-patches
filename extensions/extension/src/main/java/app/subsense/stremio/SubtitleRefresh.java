@@ -68,6 +68,16 @@ import java.util.regex.Pattern;
  * - GET <base>/patch/v1/subtitle?v=1&src=<address> — the same answer for any other selected subtitle of the same
  *   addon (same origin: an addon is never told another addon's addresses), once per play; "stop" = nothing better.
  * - POST <base>/patch/v1/report — one small JSON report per play (versions, hooks seen, swaps, last error).
+ * Versions (an addon that offers one subtitle that improves over time): every question says what the app can do
+ * (`caps=versions,follow`), which version it draws (`have`, 0 = none of the addon's), what Stremio shows
+ * (`showing=own|processing`) and where the viewer is (`pos`, ms: an addon can correct from there first). An answer may carry `version` (only ever goes up: an equal or older one is ignored), `more`
+ * (another version may follow; the question is asked again), `nextBy` (ms: a promise of more that expires — no news by
+ * then counts as stop), `plan` (the addon's list of versions, for the report only: the app never counts on it), `swap`
+ * {gapMs, maxWaitMs} (an upgrade waits for a gap between lines), `toast` ("" = none) and `ask` (a question to follow,
+ * same origin). "stop" ends the questions and keeps what is drawn. The number of versions is the addon's alone.
+ * `more` counts only together with a `version` (an answer without one is the last). A promise is renewed by any answer
+ * with `more` and `nextBy`; while one stands, it — not the 45-minute limit — decides how long the app keeps asking.
+ * Unknown fields are ignored, so an addon can send more later (`ext` is kept free for that).
  * Nothing but subtitle lines and a short toast can come back: files only from the same origin, at most 8 MB, plain
  * text only.
  *
@@ -76,7 +86,9 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.2.1";
+    static final String PATCH_VERSION = "0.3.0";
+    /** What this app can do, sent with every question: the addon never answers with something it cannot handle. */
+    static final String CAPS = "versions,follow";
     private static final int PROTOCOL = 1;
 
     private static final Pattern OUR_PATH = Pattern.compile("/sub/[^/]+/\\d+\\.srt$");
@@ -94,6 +106,10 @@ public final class SubtitleRefresh {
     private static final int TIMEOUT_MS = 10000;
     private static final int MAX_FILE = 8 * 1024 * 1024;
     private static final long WATCHDOG_MS = 2000;
+    /** At most this many versions of one subtitle per play (a safety net against a broken addon, not a plan). */
+    private static final int MAX_VERSIONS = 100;
+    /** However the addon renews its promises: with no new version for this long, the questions end. */
+    private static final long NO_VERSION_MAX_MS = 60 * 60 * 1000L;
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final ExecutorService NET = Executors.newFixedThreadPool(2, r -> {
@@ -129,6 +145,26 @@ public final class SubtitleRefresh {
         /** Drawing: the lines we draw instead of Stremio's, for `drawingFor` (null = Stremio draws). */
         Line[] drawing;
         String drawingFor;
+        /** A newer version of `drawingFor`, switched in at the next gap between lines (or after `nextMaxWaitMs`). */
+        Line[] nextLines;
+        long nextSince;
+        long nextGapMs;
+        long nextMaxWaitMs;
+        String nextToast;
+        /** For the report: the question, version and answer time of the queued version (counted when it is drawn). */
+        Ask nextAsk;
+        int nextVersion;
+        long nextRepliedAt;
+        /** A first version over Stremio's own copy, drawn at the next gap in Stremio's lines (or after `firstDeadline`). */
+        Line[] firstLines;
+        String firstFor;
+        String firstToast;
+        Ask firstAsk;
+        int firstVersion;
+        long firstRepliedAt;
+        /** Drawing was handed back after a failure for this address; redrawn from memory at most a few times. */
+        String failedFor;
+        int redraws;
         List<Cue> shown = Collections.emptyList();
         List<Cue> lastStremio = Collections.emptyList();
         long lastTickAt;
@@ -161,8 +197,21 @@ public final class SubtitleRefresh {
         final String base;
         final long startedAt = SystemClock.elapsedRealtime();
         long errorDelay = RETRY_MS;
-        boolean placeholderSeen;
+        volatile boolean placeholderSeen;
         boolean busy;
+        int errors;
+        int versions;
+        boolean counted;
+        /** When the last version arrived (elapsedRealtime; 0 = none yet). */
+        long lastVersionAt;
+        /** The last question said `showing=own` (the addon may then have chosen a silent swap). */
+        volatile boolean askedOwn;
+        /** The version of the addon's file this app draws (0 = none: Stremio's own file or the processing file). */
+        volatile int have;
+        /** A promise of another version expires then (elapsedRealtime; 0 = no promise). */
+        long leaseUntil;
+        /** The playback position when the question was sent (-1 = unknown). */
+        volatile long posMs = -1;
         /** The one scheduled next question (null = none): a new schedule always replaces it. */
         Runnable pending;
         /** Set when the play ends: the background thread sends nothing more for this question. */
@@ -229,6 +278,21 @@ public final class SubtitleRefresh {
             if (s.drawing != null) return s.shown; // ours are drawn: Stremio's copy stays hidden
             if (s.selected == null) evaluateSelection(s);
             Selected sel = s.selected;
+            if (sel != null && sel.address.equals(s.failedFor) && s.redraws < 3 && cues != null && !cues.isEmpty()) {
+                // drawing was handed back after a failure while this subtitle stayed selected: Stremio shows its own
+                // (older) copy again, so the version in memory is drawn again — a few times at most
+                Line[] mem = s.files.get(sel.address);
+                if (mem != null) {
+                    s.redraws++;
+                    s.failedFor = null;
+                    startDrawing(s, sel.address, mem, null);
+                    if (s.drawing != null) return s.shown;
+                }
+            }
+            if (sel != null && s.firstLines != null && sel.address.equals(s.firstFor) && (cues == null || cues.isEmpty())) {
+                drawFirst(s); // a gap in Stremio's own lines: the first version comes in now
+                if (s.drawing != null) return s.shown;
+            }
             if (sel != null) {
                 String tagPath = tagIn(cues);
                 Ask a = s.asks.get(sel.address);
@@ -242,12 +306,17 @@ public final class SubtitleRefresh {
                     if (a == null || a.generic) {
                         String path = tagPath != null ? tagPath : statePathFor(sel.address);
                         String origin = originOf(sel.address);
-                        if (path != null) startAsking(s, new Ask(sel.address, origin, path, false, baseOf(origin, path)));
+                        if (path != null) {
+                            Ask n = new Ask(sel.address, origin, path, false, baseOf(origin, path));
+                            n.placeholderSeen = true; // before the first question: it says what is on screen
+                            startAsking(s, n);
+                        }
                     } else if (tagPath != null && !tagPath.equals(a.path)) {
                         a.path = tagPath;
                     }
                     Ask now = s.asks.get(sel.address);
-                    if (now != null && !now.placeholderSeen) {
+                    if (now != null && !now.counted) {
+                        now.counted = true;
                         now.placeholderSeen = true;
                         s.report.placeholders++;
                         if (now.base != null) s.reportBase = now.base;
@@ -315,10 +384,17 @@ public final class SubtitleRefresh {
         s.selected = now;
         log("selected subtitle: " + (is != null ? is : "none / not side-loaded"));
         if (s.drawing != null && (is == null || !is.equals(s.drawingFor))) release(s, "another subtitle is selected", false);
+        if (s.firstLines != null && (is == null || !is.equals(s.firstFor))) { // a queued first version is for another one
+            s.firstLines = null;
+            MAIN.removeCallbacks(FIRST_DEADLINE);
+        }
+        if (is == null || !is.equals(s.failedFor)) s.failedFor = null;
         if (now == null) return;
         Line[] lines = s.files.get(now.address);
         if (lines != null) {
             startDrawing(s, now.address, lines, null); // replaced earlier in this play: back to it, no toast
+            Ask more = s.asks.get(now.address); // a later version may still come
+            if (more != null) poll(s, more);
             return;
         }
         Ask a = s.asks.get(now.address);
@@ -453,14 +529,29 @@ public final class SubtitleRefresh {
             a.pending = null;
         }
         if (s.selected == null || !a.address.equals(s.selected.address)) return; // asked again when selected again
-        if (SystemClock.elapsedRealtime() - a.startedAt > GIVE_UP_MS) {
+        if (a.leaseUntil == 0 && SystemClock.elapsedRealtime() - a.startedAt > GIVE_UP_MS) {
             s.asks.remove(a.address);
             s.stopped.add(a.address);
             s.report.event("gave up waiting for " + slotOf(a.address));
             return;
         }
+        if (a.lastVersionAt > 0 && SystemClock.elapsedRealtime() - a.lastVersionAt > NO_VERSION_MAX_MS) {
+            s.asks.remove(a.address);
+            s.stopped.add(a.address);
+            s.report.event("no new version of " + slotOf(a.address) + " for an hour (have v" + a.have + ")");
+            return;
+        }
+        if (a.leaseUntil > 0 && SystemClock.elapsedRealtime() > a.leaseUntil) {
+            // the addon promised another version and has said nothing since: what is drawn stays, no more questions
+            s.asks.remove(a.address);
+            s.stopped.add(a.address);
+            s.report.event("the promised next version of " + slotOf(a.address) + " never came (have v" + a.have + ")");
+            return;
+        }
         if (a.busy) return;
         a.busy = true;
+        Player pl = s.player.get();
+        a.posMs = pl != null ? Math.max(0, pl.getCurrentPosition()) : -1; // where the viewer is (an addon may work from there)
         final int gen = s.gen;
         NET.execute(() -> {
             if (a.cancelled) return; // the play ended while this question waited for a thread
@@ -511,7 +602,9 @@ public final class SubtitleRefresh {
                 s.report.lastError = r.error;
                 s.report.lastErrorOrigin = a.origin;
                 log("question failed: " + r.error);
-                if (a.generic) { // a generic question is asked once per play
+                // a generic question is asked once per play — but for one of the addon's own entries (the way into its
+                // versions) a passing failure is retried a few times first
+                if (a.generic && (statePathFor(a.address) == null || ++a.errors >= 3)) {
                     s.asks.remove(a.address);
                     s.settled.add(a.address);
                     return;
@@ -521,6 +614,18 @@ public final class SubtitleRefresh {
                 return;
             }
             a.errorDelay = RETRY_MS;
+            if (r.plan != null) {
+                s.report.plan = r.plan;
+                s.report.planOrigin = a.origin;
+            }
+            if (a.generic && r.askPath != null && !"stop".equals(r.op)) {
+                // the addon names the question to follow for this subtitle (its one improving entry): asked on the
+                // subtitle's own origin, as if a processing line had named it
+                Ask f = new Ask(a.address, a.origin, r.askPath, false, a.base);
+                if (a.base != null) s.reportBase = a.base;
+                startAsking(s, f);
+                return;
+            }
             if ("stop".equals(r.op)) {
                 s.asks.remove(a.address);
                 if (a.generic) {
@@ -532,15 +637,61 @@ public final class SubtitleRefresh {
                 return;
             }
             if ("replace".equals(r.op) && r.lines != null) {
-                s.asks.remove(a.address);
+                int had = a.have;
+                if (r.version > 0) a.have = r.version;
+                a.lastVersionAt = SystemClock.elapsedRealtime();
                 s.files.put(a.address, r.lines);
-                log("replacement ready: " + r.lines.length + " lines for " + a.address);
+                // more may follow: keep asking (the promise expires after nextBy); otherwise this is the last version
+                boolean more = r.more && r.version > 0 && ++a.versions < MAX_VERSIONS;
+                if (more) {
+                    a.leaseUntil = SystemClock.elapsedRealtime() + (r.nextByMs > 0 ? Math.min(r.nextByMs, GIVE_UP_MS) : GIVE_UP_MS);
+                } else {
+                    s.asks.remove(a.address);
+                    a.leaseUntil = 0;
+                }
+                log("replacement ready: " + r.lines.length + " lines for " + a.address
+                        + (r.version > 0 ? " (version " + r.version + (more ? ", more may follow" : ", the last") + ")" : ""));
+                // the first version over the processing line always says so (the addon may have answered before the
+                // processing line was on screen); otherwise the addon's toast, else the notice only for that first swap
+                boolean overProcessing = !a.generic && had == 0 && a.placeholderSeen;
+                String toast = overProcessing && (!r.toastGiven || (r.toast.isEmpty() && r.askedOwn)) ? TOAST
+                        : r.toastGiven ? (r.toast.isEmpty() ? null : r.toast) : (!a.generic && had == 0 ? TOAST : null);
                 if (s.selected != null && a.address.equals(s.selected.address)) {
-                    startDrawing(s, a.address, r.lines, r.toast != null ? r.toast : (a.generic ? null : TOAST));
-                    s.report.swap(a, SystemClock.elapsedRealtime() - r.repliedAt);
+                    long gap = r.gapMs >= 0 ? r.gapMs : 400;
+                    long maxWait = r.maxWaitMs >= 0 ? r.maxWaitMs : 8000;
+                    if (s.drawing != null && a.address.equals(s.drawingFor)) {
+                        // an upgrade of what is on screen: switched in at the next gap between lines
+                        s.nextLines = r.lines;
+                        s.nextSince = SystemClock.uptimeMillis();
+                        s.nextGapMs = gap;
+                        s.nextMaxWaitMs = maxWait;
+                        s.nextToast = toast;
+                        s.nextAsk = a;
+                        s.nextVersion = r.version;
+                        s.nextRepliedAt = r.repliedAt;
+                        tickSoon(s.listener);
+                    } else if (!overProcessing && had == 0 && !a.generic && !s.lastStremio.isEmpty()) {
+                        // the first version over Stremio's own copy of this subtitle: at the next gap in its lines
+                        s.firstLines = r.lines;
+                        s.firstFor = a.address;
+                        s.firstToast = toast;
+                        s.firstAsk = a;
+                        s.firstVersion = r.version;
+                        s.firstRepliedAt = r.repliedAt;
+                        MAIN.removeCallbacks(FIRST_DEADLINE);
+                        MAIN.postDelayed(FIRST_DEADLINE, maxWait);
+                    } else {
+                        startDrawing(s, a.address, r.lines, toast);
+                        s.report.swap(a, SystemClock.elapsedRealtime() - r.repliedAt, r.version);
+                    }
                     if (a.base != null) s.reportBase = a.base;
                 }
+                if (more) pollLater(s, a, Math.max(RETRY_MS, r.retryMs)); // the addon holds the next question anyway
                 return;
+            }
+            if (r.more && r.nextByMs > 0 && a.have > 0) {
+                // the addon renews its promise of a later version while it works
+                a.leaseUntil = SystemClock.elapsedRealtime() + Math.min(r.nextByMs, GIVE_UP_MS);
             }
             // an answer that was not held (an addon without the long wait): never ask faster than RETRY_MS
             long delay = Math.max(0, r.retryMs);
@@ -556,7 +707,18 @@ public final class SubtitleRefresh {
         long retryMs = RETRY_MS;
         Line[] lines;
         String toast;
+        /** The answer named a toast ("" = none); otherwise the app's default applies. */
+        boolean toastGiven;
         String error;
+        int version;
+        boolean more;
+        long nextByMs;
+        String askPath;
+        long gapMs = -1;
+        long maxWaitMs = -1;
+        String plan;
+        /** The question said `showing=own`. */
+        boolean askedOwn;
         /** How long the question took (a held question takes long). */
         long tookMs;
         /** When the addon said the file is ready. */
@@ -566,7 +728,13 @@ public final class SubtitleRefresh {
     /** Background thread: one question, and the file when the answer is "replace". */
     private static Answer ask(Ask a) throws Exception {
         Answer r = new Answer();
+        final int have = a.have;
+        final boolean own = !a.placeholderSeen;
+        a.askedOwn = own;
+        r.askedOwn = own;
         String q = a.origin + a.path + (a.path.contains("?") ? "&" : "?") + "v=" + PROTOCOL + "&wait=" + (a.generic ? 0 : WAIT_S)
+                + "&caps=" + CAPS + "&have=" + have + "&showing=" + (own ? "own" : "processing")
+                + (a.posMs >= 0 ? "&pos=" + a.posMs : "")
                 + "&src=" + URLEncoder.encode(a.address, "UTF-8");
         Response st = http("GET", q, null, a.generic ? TIMEOUT_MS : (WAIT_S + 15) * 1000, a);
         if (st.code == 404 && !a.generic && isProtocolStop(st)) {
@@ -604,9 +772,36 @@ public final class SubtitleRefresh {
         }
         r.op = op;
         r.retryMs = Math.max(500, Math.min(120000, j.optLong("retryMs", RETRY_MS)));
-        String toast = j.optString("toast", "");
-        r.toast = toast.isEmpty() ? null : toast.substring(0, Math.min(80, toast.length()));
+        r.toastGiven = j.has("toast") && !j.isNull("toast");
+        String toast = r.toastGiven ? j.optString("toast", "") : "";
+        r.toast = toast.substring(0, Math.min(80, toast.length()));
+        long ver = j.optLong("version", 0);
+        if (ver < 0 || ver > Integer.MAX_VALUE) { // a broken answer: ignored, asked again with the back-off
+            r.op = "wait";
+            r.error = "the answer's version is out of range";
+            return r;
+        }
+        r.version = (int) ver;
+        r.more = j.optBoolean("more", false);
+        r.nextByMs = Math.max(0, j.optLong("nextBy", 0));
+        String follow = j.optString("ask", "");
+        r.askPath = follow.startsWith("/") && !follow.startsWith("//") && follow.length() < 300 ? follow : null;
+        JSONObject swap = j.optJSONObject("swap");
+        if (swap != null) {
+            long g = swap.optLong("gapMs", -1);
+            long w = swap.optLong("maxWaitMs", -1);
+            r.gapMs = g < 0 ? -1 : Math.min(10000, g); // not given: the app's own default
+            r.maxWaitMs = w < 0 ? -1 : Math.min(60000, w);
+        }
+        JSONObject plan = j.optJSONObject("plan");
+        if (plan != null) r.plan = plan.toString().substring(0, Math.min(300, plan.toString().length()));
         if (!"replace".equals(op)) return r;
+        if (a.generic && r.askPath != null) return r; // a question to follow: its file is fetched there
+        if (r.version > 0 && r.version <= have) { // versions only go up: an equal or older one is never drawn again
+            r.op = "wait";
+            r.more = true;
+            return r;
+        }
         String file = j.optString("file", "");
         String fileUrl = file.isEmpty() ? a.address : resolveSameOrigin(a.origin, file);
         if (fileUrl == null) {
@@ -857,27 +1052,58 @@ public final class SubtitleRefresh {
     private static void startDrawing(Session s, String address, Line[] lines, String toast) {
         s.drawing = lines;
         s.drawingFor = address;
+        s.nextLines = null;
+        s.nextAsk = null;
+        if (address.equals(s.firstFor)) {
+            s.firstLines = null;
+            MAIN.removeCallbacks(FIRST_DEADLINE);
+        }
         s.shown = Collections.emptyList();
         Player p = s.player.get();
         if (toast != null) {
             s.swappedAt = SystemClock.elapsedRealtime();
             log("swapped at " + (p != null ? p.getCurrentPosition() : -1) + " ms, text delay " + textDelayMs(s) + " ms");
-            View v = s.playerView.get();
-            // only over the player itself: never over another app when Stremio is in the background
-            if (v != null && v.isAttachedToWindow() && v.getWindowVisibility() == View.VISIBLE) {
-                Toast.makeText(v.getContext(), toast, Toast.LENGTH_LONG).show();
-            }
+            showToast(s, toast);
         }
         tick(s);
         MAIN.removeCallbacks(WATCHDOG);
         MAIN.postDelayed(WATCHDOG, WATCHDOG_MS);
     }
 
+    private static final Runnable FIRST_DEADLINE = () -> {
+        Session s = session;
+        if (s != null && s.firstLines != null) drawFirst(s);
+    };
+
+    /** The queued first version comes in (a gap in Stremio's lines, or its time is up) if its subtitle is still selected. */
+    private static void drawFirst(Session s) {
+        Line[] lines = s.firstLines;
+        String address = s.firstFor;
+        s.firstLines = null;
+        MAIN.removeCallbacks(FIRST_DEADLINE);
+        if (lines == null || s.selected == null || !s.selected.address.equals(address)) return;
+        startDrawing(s, address, lines, s.firstToast);
+        if (s.firstAsk != null) s.report.swap(s.firstAsk, SystemClock.elapsedRealtime() - s.firstRepliedAt, s.firstVersion);
+        s.firstAsk = null;
+    }
+
+    /** A short notice over the player itself — never over another app when Stremio is in the background. */
+    private static void showToast(Session s, String toast) {
+        if (toast == null) return;
+        View v = s.playerView.get();
+        if (v != null && v.isAttachedToWindow() && v.getWindowVisibility() == View.VISIBLE) {
+            Toast.makeText(v.getContext(), toast, Toast.LENGTH_LONG).show();
+        }
+    }
+
     /** Hands the screen back to Stremio: its own last cues are shown again at once. */
     private static void release(Session s, String why, boolean failure) {
         MAIN.removeCallbacks(TICK);
         MAIN.removeCallbacks(WATCHDOG);
+        s.nextLines = null; // the latest version stays in s.files for a later return to this subtitle
+        s.nextAsk = null;
         if (s.drawing == null) return;
+        if (failure) s.failedFor = s.drawingFor;
         s.drawing = null;
         s.drawingFor = null;
         draw(s, s.lastStremio);
@@ -912,6 +1138,17 @@ public final class SubtitleRefresh {
             }
             Line[] lines = s.drawing;
             long t = p.getCurrentPosition() - textDelayMs(s); // Stremio shows a line at T when position − delay = T
+            if (s.nextLines != null && (inGap(lines, t, s.nextGapMs) || SystemClock.uptimeMillis() - s.nextSince >= s.nextMaxWaitMs)) {
+                // a newer version: switched in while no line is on screen, so nothing jumps under the viewer's eyes
+                lines = s.nextLines;
+                s.drawing = lines;
+                s.nextLines = null;
+                log("upgraded the drawn subtitle at " + p.getCurrentPosition() + " ms (" + lines.length + " lines)");
+                showToast(s, s.nextToast);
+                s.nextToast = null;
+                if (s.nextAsk != null) s.report.swap(s.nextAsk, SystemClock.elapsedRealtime() - s.nextRepliedAt, s.nextVersion);
+                s.nextAsk = null;
+            }
             List<Cue> now = new ArrayList<>(2);
             long next = Long.MAX_VALUE;
             int i = lastStartingBy(lines, t);
@@ -922,6 +1159,7 @@ public final class SubtitleRefresh {
                 }
             }
             if (i + 1 < lines.length) next = Math.min(next, lines[i + 1].start);
+            if (s.nextLines != null) next = Math.min(next, t + 250); // waiting for a gap: look again soon
             if (!sameText(now, s.shown)) draw(s, now);
             s.lastTickAt = SystemClock.uptimeMillis(); // the Handler's own clock: it stops while the device sleeps
             long wait;
@@ -937,6 +1175,14 @@ public final class SubtitleRefresh {
             fail("tick", t);
             release(s, "error while drawing: " + t, true);
         }
+    }
+
+    /** No line of `lines` is on screen at `t`, and the next one starts at least `gapMs` later. */
+    static boolean inGap(Line[] lines, long t, long gapMs) {
+        int i = lastStartingBy(lines, t);
+        for (int k = Math.max(0, i - 8); k <= i; k++) if (lines[k].end > t) return false;
+        long nextStart = i + 1 < lines.length ? lines[i + 1].start : Long.MAX_VALUE;
+        return nextStart - t >= gapMs;
     }
 
     /** The tick must have run recently while we draw; if the main loop lost it, draw again or step aside. */
@@ -1048,9 +1294,14 @@ public final class SubtitleRefresh {
         final JSONArray swaps = new JSONArray();
         final List<String> events = new ArrayList<>();
 
-        void swap(Ask a, long readyToDrawMs) {
+        /** The addon's last plan (its list of versions), as it sent it: kept for the report only. */
+        String plan;
+        String planOrigin;
+
+        void swap(Ask a, long readyToDrawMs, int version) {
+            if (swaps.length() >= 20) return;
             try {
-                swaps.put(new JSONObject().put("src", a.address).put("generic", a.generic)
+                swaps.put(new JSONObject().put("src", a.address).put("generic", a.generic).put("version", version)
                         .put("waitedMs", SystemClock.elapsedRealtime() - a.startedAt).put("readyToDrawMs", readyToDrawMs));
             } catch (Throwable ignored) {
                 // a report is best effort
@@ -1065,6 +1316,8 @@ public final class SubtitleRefresh {
 
     private static void endSession(Session s, String why) {
         release(s, why, false);
+        s.firstLines = null;
+        MAIN.removeCallbacks(FIRST_DEADLINE);
         for (Ask a : s.asks.values()) cancel(a); // nothing more is asked for a play that ended
         Player p = s.player.get();
         if (p != null) {
@@ -1087,7 +1340,19 @@ public final class SubtitleRefresh {
         JSONArray waiting = new JSONArray();
         // only what concerns the addon receiving the report: never another addon's addresses or errors
         String own = originOf(base);
-        for (Ask a : s.asks.values()) if (!a.generic && a.placeholderSeen && own != null && own.equals(a.origin)) waiting.put(a.address);
+        JSONArray upgrading = new JSONArray();
+        for (Ask a : s.asks.values()) {
+            if (a.generic || own == null || !own.equals(a.origin)) continue;
+            if (a.have > 0 || !a.placeholderSeen) { // the one improving entry: still waiting for a later version
+                try {
+                    upgrading.put(new JSONObject().put("src", a.address).put("have", a.have));
+                } catch (Throwable ignored) {
+                    // best effort
+                }
+            } else {
+                waiting.put(a.address);
+            }
+        }
         JSONArray swaps = new JSONArray();
         for (int i = 0; i < s.report.swaps.length(); i++) {
             JSONObject x = s.report.swaps.optJSONObject(i);
@@ -1100,10 +1365,11 @@ public final class SubtitleRefresh {
                     .put("hooks", new JSONObject().put("player", s.report.hookPlayer).put("cues", s.report.hookCues)
                             .put("delay", s.report.delayReadable == null ? JSONObject.NULL : s.report.delayReadable))
                     .put("placeholders", s.report.placeholders).put("swaps", swaps)
-                    .put("waiting", waiting).put("releases", s.report.releases)
+                    .put("waiting", waiting).put("upgrading", upgrading).put("releases", s.report.releases)
                     .put("bufferingAfterSwap", s.report.bufferingAfterSwap)
                     .put("lastError", lastError == null ? JSONObject.NULL : lastError)
-                    .put("events", new JSONArray(s.report.events));
+                    .put("events", new JSONArray(s.report.events))
+                    .put("plan", s.report.plan == null || !own.equals(s.report.planOrigin) ? JSONObject.NULL : s.report.plan);
             final byte[] body = j.toString().getBytes(StandardCharsets.UTF_8);
             final String url = base + "/patch/v1/report";
             NET.execute(() -> {

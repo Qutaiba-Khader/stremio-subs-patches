@@ -28,6 +28,23 @@ How it works (protocol 1, see the comment at the top of `SubtitleRefresh.java`):
 Leaving the video ends its questions at once (an open request is closed, nothing queued is sent). An addon's `stop`,
 an unknown job (a JSON 404) and a 45-minute limit hold for the rest of the play.
 
+### One subtitle that improves over time (0.3.0)
+
+An addon can offer a single entry and replace it with better versions while the viewer watches. The app never
+assumes how many versions there are: the addon's answers decide.
+
+- Every question says what the app can do and where it stands: `caps=versions,follow`, `have=<version it draws, 0 =
+  none>`, `showing=own|processing` (Stremio's own copy or the processing file) and `pos=<playback position, ms>`, so an
+  addon can, for example, correct the part the viewer is about to watch first.
+- An answer may carry: `version` (a number that only goes up; an equal or older one is ignored), `more` (another
+  version may follow — the app asks again), `nextBy` (ms: the promise expires if nothing comes by then; any answer
+  with `more` renews it), `plan` (the addon's list of versions, kept for the report only), `swap: {gapMs, maxWaitMs}`
+  (an upgrade is switched in at a gap between lines), `toast` (`""` = none) and, on the generic question, `ask`
+  (a question to follow on the same origin). Unknown fields are ignored; `ext` is kept free for later data.
+- `stop` ends the questions and keeps what is drawn — also when a promised version never came. With no new version
+  for an hour, or when a promise expires, the app stops by itself. At most 100 versions per subtitle and play.
+- Older apps don't send `caps`, so an addon answers them in protocol 1.
+
 Picking another subtitle or turning subtitles off hands the screen back to Stremio at once; picking our entry again in
 the same play uses the file already downloaded. A watchdog and error handling hand the screen back on any problem.
 

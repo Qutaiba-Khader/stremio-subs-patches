@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+- One subtitle that improves over time: an addon can offer one entry and replace it with each better version while the
+  viewer watches — as many versions as the addon's answers say (`version` only goes up, `more`, `nextBy`, `plan`).
+- Each upgrade is switched in at a gap between lines (`swap.gapMs`, or after `swap.maxWaitMs`), silently unless the
+  addon names a notice; the first version over Stremio's own copy also waits for a gap.
+- A promised version that never comes ends cleanly: the addon's `stop`, an expired promise, or an hour with no new
+  version — what is drawn stays.
+- Questions carry `caps`, `have`, `showing` and `pos` (where the viewer is), and the generic answer can name a
+  question to follow (`ask`); older addons and older apps keep protocol 1.
+- After a drawing failure, the newest version in memory is drawn again (a few times at most) instead of leaving
+  Stremio's older copy; a passing failure of the generic question on one of the addon's own entries is retried.
+- Reports: each swap with its version, counted when it is drawn; entries still upgrading; the addon's plan.
+- Tested: a JVM harness for the versions protocol (N = 1, 2, 3, 5, 8 versions, stop, silent addon, follow, gaps,
+  leave/reopen) and on the A50: 3 and 5 versions, a promised version that never came, and an addon gone silent.
+
 ## 0.2.1
 - Leaving a video ends its questions at once: an open request is closed and nothing queued is sent any more, so quick
   leave/reopen never makes a new play wait behind an old one.
