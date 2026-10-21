@@ -53,6 +53,15 @@ Hooks: only Media3 library classes — `PlayerView.setPlayer` and `SubtitleView.
 is ignored and everything else keeps working. Addon subtitles reach the player through Stremio's local streaming server
 (`http://127.0.0.1:11470/subtitles.srt?from=<addon url>`); the patch reads the addon's address from that.
 
+## Ready-made APKs
+
+[morphe-builder](https://github.com/Qutaiba-Khader/morphe-builder/releases) publishes two Android TV APKs with each
+release of these patches (and each new Stremio version), both arm64-v8a:
+
+- `stremio-tv-replacement-subs-…apk` replaces the original: same package `com.stremio.one`, same name "Stremio". It is
+  signed with the builder's own key, not Stremio's, so uninstall the original Stremio once before installing it.
+- `stremio-tv-clone-subs-…apk` installs beside the original: package `com.stremio.one.subs`, named "Stremio Subs".
+
 ## Test build
 
 `tools/patch.sh <stremio-tv.apk>` builds the bundle and patches the APK with it plus Morphe's "Clone app" (package
