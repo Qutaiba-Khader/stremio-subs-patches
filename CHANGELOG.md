@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.3.1
+- Stand-in addon (test only, no app change): a question asked before Stremio's own fetch is answered waits for that
+  fetch, like the addon (D77 fix), so Stremio's copy is never swapped for itself.
 - The addon's `"toast": ""` now always means no notice, also for the first version drawn over the processing file (0.3.0
   still showed its own notice there). An addon that names no toast keeps the notice for that first swap.
 - Tested on the A50 with the stand-in addon: a processing file with no visible text (only its tag), versions 1 → 2 → 3

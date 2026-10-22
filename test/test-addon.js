@@ -102,9 +102,12 @@ http.createServer((req, res) => {
         res.setHeader('Cache-Control', 'no-store');
         if (kind === 'state') {
             const caps = String(url.searchParams.get('caps') || '').split(',');
-            let have = Number(url.searchParams.get('have')) || 0;
-            // like the addon (D77): Stremio's own copy is the version its fetch was served
-            if (!have && url.searchParams.get('showing') === 'own') have = served.get(job) || 0;
+            const asked = Number(url.searchParams.get('have')) || 0;
+            // like the addon (D77): Stremio's own copy is the version its fetch was served — read again on every look,
+            // as the question may come before Stremio's own fetch is answered
+            const ownCopy = !asked && url.searchParams.get('showing') === 'own';
+            const haveNow = () => (ownCopy ? (served.has(job) ? served.get(job) : null) : asked);
+            let have = haveNow() || 0;
             const until = Date.now() + Math.min(25, Number(url.searchParams.get('wait')) || 0) * 1000;
             log(`  state v? have=${have} showing=${url.searchParams.get('showing')} pos=${url.searchParams.get('pos')} caps=${caps.join('+')}`);
             if (k !== 1) return json(res, { subsense: 1, v: 1, op: 'stop', error: 'unknown job or slot' }, 404);
@@ -114,8 +117,11 @@ http.createServer((req, res) => {
             }
             if (SILENT_AFTER != null && age(job) >= SILENT_AFTER) { log('  (silent: no answer)'); return undefined; }
             const answer = () => {
+                const had = haveNow();
+                have = had || 0;
                 const vs = versionsOf(job, have);
-                if (!vs.best && vs.more && Date.now() < until && !res.destroyed) return setTimeout(answer, 500);
+                const fetchPending = ownCopy && had === null && vs.best;
+                if (((!vs.best && vs.more) || fetchPending) && Date.now() < until && !res.destroyed) return setTimeout(answer, 500);
                 const base = { subsense: 1, v: 1, plan: vs.plan, retryMs: 1000 };
                 if (vs.best) {
                     log(`  → version ${vs.best}${vs.more ? ' (more may follow)' : ' (the last)'}`);
