@@ -26,6 +26,7 @@ const BROKEN_AFTER = process.env.BROKEN_AFTER ? Number(process.env.BROKEN_AFTER)
 const SILENT_AFTER = process.env.SILENT_AFTER ? Number(process.env.SILENT_AFTER) : null;
 const NEXTBY_MS = Number(process.env.NEXTBY_S || 1800) * 1000;
 const jobs = new Map(); // jobId → created (ms)
+const served = new Map(); // ONE=1: jobId → the version the one entry's fetch served (0 = processing file), like the addon (D77)
 
 const log = (s) => console.log(`${new Date().toISOString().slice(11, 23)} ${s}`);
 const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -35,8 +36,9 @@ const DIGIT = ['', '١', '٢', '٣'];
 // the invisible tag the addon puts in its processing file: "ssx1 <path>" in Unicode tag characters (NO_TAG=1: none)
 const tagFor = (path) => (process.env.NO_TAG === '1' ? '' : Array.from(`ssx1 ${path}`, (c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join(''));
 
-function placeholder(job, k) { // results.js placeholderText/placeholderCues, verbatim
-    const text = `ai subtitle ${k} processing — pick it again in ~2 min\nالترجمة ${DIGIT[k] || k} قيد المعالجة — اخترها مرة أخرى بعد دقيقتين تقريباً${tagFor(`/sub/${job}/${k}.state`)}`;
+function placeholder(job, k) { // results.js placeholderText/placeholderCues, verbatim (since D77 no visible text; OLD_TEXT=1: the older wording)
+    const shown = process.env.OLD_TEXT === '1' ? `ai subtitle ${k} processing — pick it again in ~2 min\nالترجمة ${DIGIT[k] || k} قيد المعالجة — اخترها مرة أخرى بعد دقيقتين تقريباً` : '';
+    const text = `${shown}${tagFor(`/sub/${job}/${k}.state`)}`;
     const out = [];
     for (let t = 0, i = 1; t < 4 * 3600 * 1000; t += 60000, i++) out.push(`${i}\n${srtTime(t)} --> ${srtTime(t + 59500)}\n${text}\n`);
     return out.join('\n');
@@ -100,7 +102,9 @@ http.createServer((req, res) => {
         res.setHeader('Cache-Control', 'no-store');
         if (kind === 'state') {
             const caps = String(url.searchParams.get('caps') || '').split(',');
-            const have = Number(url.searchParams.get('have')) || 0;
+            let have = Number(url.searchParams.get('have')) || 0;
+            // like the addon (D77): Stremio's own copy is the version its fetch was served
+            if (!have && url.searchParams.get('showing') === 'own') have = served.get(job) || 0;
             const until = Date.now() + Math.min(25, Number(url.searchParams.get('wait')) || 0) * 1000;
             log(`  state v? have=${have} showing=${url.searchParams.get('showing')} pos=${url.searchParams.get('pos')} caps=${caps.join('+')}`);
             if (k !== 1) return json(res, { subsense: 1, v: 1, op: 'stop', error: 'unknown job or slot' }, 404);
@@ -116,7 +120,7 @@ http.createServer((req, res) => {
                 if (vs.best) {
                     log(`  → version ${vs.best}${vs.more ? ' (more may follow)' : ' (the last)'}`);
                     return json(res, { ...base, op: 'replace', file: `/sub/${job}/${vs.best}.srt`, version: vs.best, more: vs.more, ...(vs.more ? { nextBy: NEXTBY_MS } : {}),
-                        ...(have > 0 || url.searchParams.get('showing') === 'own' ? { toast: '' } : {}), swap: { gapMs: 400, maxWaitMs: 8000 } });
+                        toast: '', swap: { gapMs: 400, maxWaitMs: 8000 } });
                 }
                 log(`  → ${vs.more ? 'wait' : 'stop (nothing more)'}`);
                 return json(res, vs.more ? { ...base, op: 'wait', version: have, more: true, nextBy: NEXTBY_MS } : { ...base, op: 'stop', version: have, more: false });
@@ -128,7 +132,8 @@ http.createServer((req, res) => {
         if (k === 1) for (let i = 1; i <= VERSIONS.length; i++) if (versionReady(job, i)) v = i;
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
-        if (!versionReady(job, v)) { res.setHeader('X-Addon-Processing', '1'); log(`  → version ${v}: processing file`); return res.end(placeholder(job, k)); }
+        if (!versionReady(job, v)) { if (k === 1) served.set(job, 0); res.setHeader('X-Addon-Processing', '1'); log(`  → version ${v}: processing file`); return res.end(placeholder(job, k)); }
+        if (k === 1) served.set(job, v);
         log(`  → version ${v} file`);
         return res.end(finished(v, 'النسخة'));
     }
@@ -161,7 +166,17 @@ http.createServer((req, res) => {
         const src = String(url.searchParams.get('src') || '');
         const caps = String(url.searchParams.get('caps') || '').split(',');
         const mm = /\/sub\/([^/?#]+)\/1\.srt\?u=1$/.exec(src);
-        if (ONE && mm && caps.includes('follow') && caps.includes('versions')) return json(res, { subsense: 1, v: 1, op: 'wait', ask: `/sub/${mm[1]}/1.state`, retryMs: 0 });
+        if (ONE && mm && caps.includes('follow') && caps.includes('versions')) {
+            // like the addon (D77): already the best and nothing more to come → nothing new, at once
+            // (also before Stremio's own fetch: nothing more is coming, so that fetch gets the final version)
+            if (jobs.has(mm[1])) {
+                const vs = versionsOf(mm[1], 0);
+                const had = served.has(mm[1]) ? served.get(mm[1]) : null;
+                if (!vs.more && (had === null || had >= vs.best)) { log('  generic → stop (nothing new)'); return json(res, { subsense: 1, v: 1, op: 'stop', version: had === null ? vs.best : had, more: false }); }
+            }
+            log('  generic → follow');
+            return json(res, { subsense: 1, v: 1, op: 'wait', ask: `/sub/${mm[1]}/1.state`, retryMs: 0 });
+        }
         return json(res, { v: 1, op: 'stop' });
     }
     if (p === '/patch/v1/report' && req.method === 'POST') {

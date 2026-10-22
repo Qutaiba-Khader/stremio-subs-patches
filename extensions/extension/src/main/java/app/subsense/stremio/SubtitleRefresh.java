@@ -86,7 +86,7 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.3.0";
+    static final String PATCH_VERSION = "0.3.1";
     /** What this app can do, sent with every question: the addon never answers with something it cannot handle. */
     static final String CAPS = "versions,follow";
     private static final int PROTOCOL = 1;
@@ -204,8 +204,6 @@ public final class SubtitleRefresh {
         boolean counted;
         /** When the last version arrived (elapsedRealtime; 0 = none yet). */
         long lastVersionAt;
-        /** The last question said `showing=own` (the addon may then have chosen a silent swap). */
-        volatile boolean askedOwn;
         /** The version of the addon's file this app draws (0 = none: Stremio's own file or the processing file). */
         volatile int have;
         /** A promise of another version expires then (elapsedRealtime; 0 = no promise). */
@@ -651,11 +649,10 @@ public final class SubtitleRefresh {
                 }
                 log("replacement ready: " + r.lines.length + " lines for " + a.address
                         + (r.version > 0 ? " (version " + r.version + (more ? ", more may follow" : ", the last") + ")" : ""));
-                // the first version over the processing line always says so (the addon may have answered before the
-                // processing line was on screen); otherwise the addon's toast, else the notice only for that first swap
+                // the addon decides: its toast, and "" = none, also for the first version over the processing line;
+                // an addon that names no toast gets the notice for that first swap only
                 boolean overProcessing = !a.generic && had == 0 && a.placeholderSeen;
-                String toast = overProcessing && (!r.toastGiven || (r.toast.isEmpty() && r.askedOwn)) ? TOAST
-                        : r.toastGiven ? (r.toast.isEmpty() ? null : r.toast) : (!a.generic && had == 0 ? TOAST : null);
+                String toast = r.toastGiven ? (r.toast.isEmpty() ? null : r.toast) : (!a.generic && had == 0 ? TOAST : null);
                 if (s.selected != null && a.address.equals(s.selected.address)) {
                     long gap = r.gapMs >= 0 ? r.gapMs : 400;
                     long maxWait = r.maxWaitMs >= 0 ? r.maxWaitMs : 8000;
@@ -717,8 +714,6 @@ public final class SubtitleRefresh {
         long gapMs = -1;
         long maxWaitMs = -1;
         String plan;
-        /** The question said `showing=own`. */
-        boolean askedOwn;
         /** How long the question took (a held question takes long). */
         long tookMs;
         /** When the addon said the file is ready. */
@@ -730,8 +725,6 @@ public final class SubtitleRefresh {
         Answer r = new Answer();
         final int have = a.have;
         final boolean own = !a.placeholderSeen;
-        a.askedOwn = own;
-        r.askedOwn = own;
         String q = a.origin + a.path + (a.path.contains("?") ? "&" : "?") + "v=" + PROTOCOL + "&wait=" + (a.generic ? 0 : WAIT_S)
                 + "&caps=" + CAPS + "&have=" + have + "&showing=" + (own ? "own" : "processing")
                 + (a.posMs >= 0 ? "&pos=" + a.posMs : "")

@@ -8,7 +8,8 @@ entries can still be "processing" when they are picked.
 
 Stremio's ExoPlayer keeps the first file it loaded for each subtitle entry for the whole play. An addon entry that was
 still "processing" when it was picked therefore keeps showing its processing line. With this patch the addon can replace
-the subtitle that is playing, with no reload and nothing for the viewer to do; a toast says so.
+the subtitle that is playing, with no reload and nothing for the viewer to do; a toast says so, unless the addon asks
+for none (`"toast": ""`).
 
 How it works (protocol 1, see the comment at the top of `SubtitleRefresh.java`):
 

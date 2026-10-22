@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+- The addon's `"toast": ""` now always means no notice, also for the first version drawn over the processing file (0.3.0
+  still showed its own notice there). An addon that names no toast keeps the notice for that first swap.
+- Tested on the A50 with the stand-in addon: a processing file with no visible text (only its tag), versions 1 → 2 → 3
+  swapped with no notice; a subtitle already finished when played: one question, answered "nothing new", no swap.
+
 ## 0.3.0
 - One subtitle that improves over time: an addon can offer one entry and replace it with each better version while the
   viewer watches — as many versions as the addon's answers say (`version` only goes up, `more`, `nextBy`, `plan`).
