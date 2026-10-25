@@ -24,7 +24,7 @@ BUNDLE="patches/build/libs/patches-$VER.mpp"
 
 rm -f "$OUT"
 java -jar "$MORPHE_CLI" patch \
-    -p "$BUNDLE" -e "Subtitle auto-refresh" -e "Test app name" \
+    -p "$BUNDLE" -e "Subtitle auto-refresh" -e "Right-to-left subtitle lines" -e "Test app name" \
     -p "$MORPHE_PATCHES" --exclusive -e "Clone app" -OpackageName="$PACKAGE" \
     --keystore="$KEYSTORE" --keystore-password="$KEYSTORE_PASSWORD" --keystore-entry-password="$KEYSTORE_PASSWORD" \
     --keystore-entry-alias="${KEYSTORE_ALIAS:-StremioSubs}" -o "$OUT" "$APK"

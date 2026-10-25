@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+- New patch "Right-to-left subtitle lines": Arabic and Hebrew subtitle lines are laid out right to left, so their
+  punctuation shows on the right side. At the start of `SubtitleView.setCues` (Media3, the same hook as before)
+  Stremio's left-to-right mark is dropped and every right-to-left line is wrapped in a right-to-left embedding, which
+  Media3's own left-to-right wrapping at draw time keeps. Nothing of Stremio's own code is read.
+- Tested on an Android 11 phone with Stremio TV 1.11.3: a normal Arabic file showed its dash and question mark on the
+  left before and on the right after; files that already carry the embedding look the same with and without the patch.
+- `tools/patch.sh` applies the new patch.
+
 ## 0.3.1
 - Stand-in addon (test only, no app change): a question asked before Stremio's own fetch is answered waits for that
   fetch, like the addon (D77 fix), so Stremio's copy is never swapped for itself.

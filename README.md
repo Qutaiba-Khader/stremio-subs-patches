@@ -49,10 +49,28 @@ assumes how many versions there are: the addon's answers decide.
 Picking another subtitle or turning subtitles off hands the screen back to Stremio at once; picking our entry again in
 the same play uses the file already downloaded. A watchdog and error handling hand the screen back on any problem.
 
-Hooks: only Media3 library classes — `PlayerView.setPlayer` and `SubtitleView.setCues`. Stremio's own code is only
+Hooks: only Media3 library classes — `PlayerView.setPlayer` and `SubtitleView.setCues` (both patches). Stremio's own code is only
 *read*: the subtitle delay, through reflection on its text renderer (`getRenderOffsetMs`); if that ever moves, the delay
 is ignored and everything else keeps working. Addon subtitles reach the player through Stremio's local streaming server
 (`http://127.0.0.1:11470/subtitles.srt?from=<addon url>`); the patch reads the addon's address from that.
+
+## Right-to-left subtitle lines (0.4.0)
+
+Arabic and Hebrew subtitle lines show their punctuation on the wrong side in Stremio: a line written "-مرحبا." is drawn
+with the dash on the left and the full stop on the right. Two things lay every line out left to right: Stremio puts a
+left-to-right mark (U+200E) in front of each subtitle line, and Media3's own `SubtitlePainter` wraps each line as
+left-to-right text when it draws it (`BidiUtils.wrapText`). Removing Stremio's mark alone changes nothing on screen
+(tested).
+
+This patch, at the start of `SubtitleView.setCues`, drops Stremio's mark and wraps every line whose first letter is
+right-to-left in a right-to-left embedding (U+202B … U+202C). Both of the above keep an explicit embedding, so the line
+is laid out right to left and its punctuation lands where the file put it. Lines that start with Latin text, and lines
+that already open with an embedding or isolate, are left as they are; styling spans are kept; any failure leaves the
+lines as they came. It works for every subtitle Stremio draws (addon files and the video's own tracks), not only
+SubSense ones. ASS subtitles drawn by libass do not go through `SubtitleView` and are not touched.
+
+A subtitle file written for left-to-right players (punctuation moved to the other end of each line so it *looked*
+right there) shows wrong once lines are right to left; the SubSense addon puts such files back before serving them.
 
 ## Ready-made APKs
 

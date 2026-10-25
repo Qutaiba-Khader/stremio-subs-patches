@@ -86,7 +86,7 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.3.1";
+    static final String PATCH_VERSION = "0.4.0";
     /** What this app can do, sent with every question: the addon never answers with something it cannot handle. */
     static final String CAPS = "versions,follow";
     private static final int PROTOCOL = 1;

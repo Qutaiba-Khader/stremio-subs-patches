@@ -64,6 +64,27 @@ val subtitleRefreshPatch = bytecodePatch(
 }
 
 @Suppress("unused")
+val rtlLinesPatch = bytecodePatch(
+    name = "Right-to-left subtitle lines",
+    description = "Arabic and Hebrew subtitle lines are laid out right to left, so their punctuation shows on the " +
+        "right side (Stremio forces every line left to right).",
+    default = true,
+) {
+    compatibleWith(STREMIO_TV)
+    extendWith("extensions/extension.mpe")
+
+    execute {
+        SubtitleViewSetCuesFingerprint.method.addInstructions(
+            0,
+            """
+                invoke-static {p1}, Lapp/subsense/stremio/RtlLines;->fix(Ljava/util/List;)Ljava/util/List;
+                move-result-object p1
+            """,
+        )
+    }
+}
+
+@Suppress("unused")
 val appNamePatch = resourcePatch(
     name = "Test app name",
     description = "Names the app \"Stremio Subs\" so the test build is told apart from the original on the launcher.",
