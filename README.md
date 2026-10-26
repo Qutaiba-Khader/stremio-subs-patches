@@ -111,6 +111,10 @@ the rest.
 Tested on Android TV 1.11.3 and the phone app 2.4.0, both on an Android 11 phone. The hooks are in the Media3 library,
 so other versions will probably patch too, but check.
 
+**Android TV 1.12.0 is not supported yet:** it shrinks and renames Media3 (the player, the media item and the subtitle
+line classes; `PlayerView` is gone), so "Subtitle auto-refresh" does not match it. Patch Android TV 1.11.3 meanwhile;
+morphe-builder builds the TV APKs from 1.11.3.
+
 `test/test-addon.js` is a stand-in for the addon with no real data: one generated test movie (clock burned in) and three
 Arabic entries in the addon's exact shape; entries 2 and 3 serve the addon's processing file until `READY2_S` /
 `READY3_S` seconds after the list call. Every finished line names its own start time, so a screenshot shows whether the
