@@ -196,6 +196,10 @@ http.createServer((req, res) => {
         if (r) {
             const a = r[1] ? Number(r[1]) : size - Number(r[2]);
             const b = r[1] && r[2] ? Math.min(Number(r[2]), size - 1) : size - 1;
+            if (!(a >= 0 && a <= b)) { // past the end (a player probing the size): not satisfiable, never a crash
+                res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+                return res.end();
+            }
             res.writeHead(206, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${a}-${b}/${size}`, 'Content-Length': b - a + 1 });
             return fs.createReadStream(VIDEO, { start: a, end: b }).pipe(res);
         }
