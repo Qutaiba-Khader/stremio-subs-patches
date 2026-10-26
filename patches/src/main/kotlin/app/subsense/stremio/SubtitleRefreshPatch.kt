@@ -39,6 +39,16 @@ object SubtitleViewSetCuesFingerprint : Fingerprint(
     parameters = listOf("Ljava/util/List;"),
 )
 
+/**
+ * Media3 MediaItem.SubtitleConfiguration.Builder(Uri): every side-loaded subtitle Stremio hands the player is built here,
+ * before the player loads it. A library class, like the two hooks above.
+ */
+object SubtitleConfigurationBuilderFingerprint : Fingerprint(
+    definingClass = "Landroidx/media3/common/MediaItem\$SubtitleConfiguration\$Builder;",
+    name = "<init>",
+    parameters = listOf("Landroid/net/Uri;"),
+)
+
 @Suppress("unused")
 val subtitleRefreshPatch = bytecodePatch(
     name = "Subtitle auto-refresh",
@@ -58,6 +68,14 @@ val subtitleRefreshPatch = bytecodePatch(
             0,
             """
                 invoke-static {p0, p1}, $EXTENSION->onSetCues(Landroid/view/View;Ljava/util/List;)Ljava/util/List;
+                move-result-object p1
+            """,
+        )
+        // before the constructor's own code: only the parameter is replaced, `this` is not touched
+        SubtitleConfigurationBuilderFingerprint.method.addInstructions(
+            0,
+            """
+                invoke-static {p1}, $EXTENSION->onSubtitleUri(Landroid/net/Uri;)Landroid/net/Uri;
                 move-result-object p1
             """,
         )

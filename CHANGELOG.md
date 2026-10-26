@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+- The questions about the addon's own entries carry the address of the video that is playing (header
+  `X-Subsense-Stream`, caps `link`): the addon reads the exact stream the viewer plays. Sent only to the addon whose
+  subtitle asks, never in an address, never logged; read on the main thread from Media3's current media item.
+- New Media3 hook, `MediaItem.SubtitleConfiguration.Builder(Uri)`: the one improving entry (`/1.srt?u=1`) is loaded
+  with `&ssp=1`, so the addon answers Stremio's own fetch at once with its processing file and the app swaps it later.
+  Every other subtitle address is left as it is.
+- The processing line `تتم معالجة الترجمة الآن` is recognised.
+- Tested on the A50 with Stremio TV 1.11.3 (temporary account, stand-in video, the addon's own code offline, nothing
+  spent): the marked fetch got the processing file in 3 ms and the line showed; every question carried the exact video
+  address played; version 1 replaced the line when it was ready and its Arabic lines showed.
+
 ## 0.4.1
 - Stremio's phone app (2.4.0, same package `com.stremio.one`, same Media3 player as Android TV) is supported. The phone
   app adds addon subtitles with no id, so "Subtitle auto-refresh" could not tell which addon subtitle was picked and

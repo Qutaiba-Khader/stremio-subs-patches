@@ -86,9 +86,16 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.4.1";
-    /** What this app can do, sent with every question: the addon never answers with something it cannot handle. */
-    static final String CAPS = "versions,follow";
+    static final String PATCH_VERSION = "0.5.0";
+    /**
+     * What this app can do, sent with every question: the addon never answers with something it cannot handle. `link`:
+     * the question carries the address of the video that is playing (header below), and the one improving entry's own
+     * fetch is marked `ssp=1` (this app swaps it, so the addon may answer at once with its processing file).
+     */
+    static final String CAPS = "versions,follow,link";
+    /** The playing video's address, sent only to the addon whose subtitle asks — never in the address, never logged. */
+    static final String LINK_HEADER = "X-Subsense-Stream";
+    private static final int MAX_LINK = 4096;
     private static final int PROTOCOL = 1;
 
     private static final Pattern OUR_PATH = Pattern.compile("/sub/[^/]+/\\d+\\.srt$");
@@ -97,6 +104,8 @@ public final class SubtitleRefresh {
     private static final String MARK_EN_2 = "pick it again";
     private static final String MARK_AR = "قيد المعالجة";
     private static final String MARK_AR_2 = "اخترها";
+    /** The processing file's line since 0.5.0 (one line is enough: no subtitle says exactly this). */
+    private static final String MARK_AR_NOW = "تتم معالجة الترجمة الآن";
     private static final String TOAST = "الترجمة جاهزة"; // الترجمة جاهزة
 
     private static final int WAIT_S = 25;
@@ -216,6 +225,8 @@ public final class SubtitleRefresh {
         volatile boolean cancelled;
         /** The open connection while a question or a file is on the way, so the end of the play can close it. */
         volatile HttpURLConnection conn;
+        /** The playing video's address for the next question (read on the main thread; null = not sent). */
+        volatile String streamLink;
 
         Ask(String address, String origin, String path, boolean generic, String base) {
             this.address = address;
@@ -488,6 +499,55 @@ public final class SubtitleRefresh {
         return s != null && (s.equals("http") || s.equals("https")) ? uri.toString() : null;
     }
 
+    /**
+     * Start of Media3 MediaItem.SubtitleConfiguration.Builder(uri): returns the address to load. Only the addon's one
+     * improving entry (/sub/<id>/1.srt?u=1) is changed: `ssp=1` is added, which tells the addon that this app swaps the
+     * file later, so its own fetch may be answered at once with the processing file. Any other address stays as it is.
+     */
+    public static Uri onSubtitleUri(Uri uri) {
+        try {
+            String addr = addonAddress(uri);
+            if (addr == null || statePathFor(addr) == null || !ONE_ENTRY.matcher(addr).find() || addr.contains("ssp=")) return uri;
+            String marked = withQuery(addr, "ssp=" + PROTOCOL);
+            if (uri.toString().equals(addr)) return Uri.parse(marked);
+            // Stremio's local streaming server: the addon's address is one query value; only that value changes
+            Uri.Builder b = uri.buildUpon().clearQuery();
+            boolean changed = false;
+            for (String name : uri.getQueryParameterNames()) {
+                for (String v : uri.getQueryParameters(name)) {
+                    boolean ours = !changed && addr.equals(v);
+                    b.appendQueryParameter(name, ours ? marked : v);
+                    changed |= ours;
+                }
+            }
+            return changed ? b.build() : uri;
+        } catch (Throwable t) {
+            fail("onSubtitleUri", t);
+            return uri;
+        }
+    }
+
+    private static final Pattern ONE_ENTRY = Pattern.compile("/sub/[^/]+/1\\.srt\\?(?:.*&)?u=1(?:&|$)");
+
+    /**
+     * The address of the video that is playing (Media3's current media item), unwrapped from Stremio's local streaming
+     * server; null when there is none or it is not http(s). Main thread only.
+     */
+    static String playingLink(Player p) {
+        try {
+            if (p == null) return null;
+            MediaItem item = p.getCurrentMediaItem();
+            if (item == null || item.localConfiguration == null) return null;
+            String link = addonAddress(item.localConfiguration.uri);
+            if (link == null || link.length() > MAX_LINK) return null;
+            String host = Uri.parse(link).getHost();
+            // a torrent played through Stremio's own server has no outside address to give
+            return host == null || host.equals("127.0.0.1") || host.equals("localhost") ? null : link;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** /sub/<id>/<k>.srt → /sub/<id>/<k>.state (the addon's own route), else null. */
     static String statePathFor(String address) {
         Uri u = Uri.parse(address);
@@ -533,7 +593,7 @@ public final class SubtitleRefresh {
 
     /** The processing line itself, not a subtitle line that merely says "processing" / "قيد المعالجة". */
     private static boolean isPlaceholderLine(String s) {
-        return (s.contains(MARK_AR) && s.contains(MARK_AR_2)) || (s.contains(MARK_EN) && s.contains(MARK_EN_2));
+        return s.contains(MARK_AR_NOW) || (s.contains(MARK_AR) && s.contains(MARK_AR_2)) || (s.contains(MARK_EN) && s.contains(MARK_EN_2));
     }
 
     // ---------------------------------------------------------------- asking the addon
@@ -578,6 +638,8 @@ public final class SubtitleRefresh {
         a.busy = true;
         Player pl = s.player.get();
         a.posMs = pl != null ? Math.max(0, pl.getCurrentPosition()) : -1; // where the viewer is (an addon may work from there)
+        // the video's address goes only with a question about one of the addon's own entries (/sub/<id>/<k>.srt)
+        a.streamLink = statePathFor(a.address) != null ? playingLink(pl) : null;
         final int gen = s.gen;
         NET.execute(() -> {
             if (a.cancelled) return; // the play ended while this question waited for a thread
@@ -757,7 +819,7 @@ public final class SubtitleRefresh {
                 + "&caps=" + CAPS + "&have=" + have + "&showing=" + (own ? "own" : "processing")
                 + (a.posMs >= 0 ? "&pos=" + a.posMs : "")
                 + "&src=" + URLEncoder.encode(a.address, "UTF-8");
-        Response st = http("GET", q, null, a.generic ? TIMEOUT_MS : (WAIT_S + 15) * 1000, a);
+        Response st = http("GET", q, null, a.generic ? TIMEOUT_MS : (WAIT_S + 15) * 1000, a, a.streamLink);
         if (st.code == 404 && !a.generic && isProtocolStop(st)) {
             r.op = "stop"; // the addon answered: it does not know this subtitle (e.g. it restarted and forgot the job)
             return r;
@@ -874,9 +936,17 @@ public final class SubtitleRefresh {
         boolean json;
     }
 
-    /** One request; `owner` (may be null) holds the open connection so that the end of the play can close it. */
     private static Response http(String method, String address, byte[] body, int readTimeoutMs, Ask owner) throws Exception {
+        return http(method, address, body, readTimeoutMs, owner, null);
+    }
+
+    /**
+     * One request; `owner` (may be null) holds the open connection so that the end of the play can close it. `link`
+     * (may be null): the playing video's address, sent as a header — never in the address, so no access log keeps it.
+     */
+    private static Response http(String method, String address, byte[] body, int readTimeoutMs, Ask owner, String link) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(address).openConnection();
+        if (link != null) conn.setRequestProperty(LINK_HEADER, link);
         if (owner != null) {
             owner.conn = conn;
             if (owner.cancelled) {

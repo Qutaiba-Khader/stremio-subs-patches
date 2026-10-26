@@ -46,10 +46,23 @@ assumes how many versions there are: the addon's answers decide.
   for an hour, or when a promise expires, the app stops by itself. At most 100 versions per subtitle and play.
 - Older apps don't send `caps`, so an addon answers them in protocol 1.
 
+### The playing link and an instant first answer (0.5.0)
+
+- `caps` adds `link`: every question about one of the addon's own entries (`/sub/<id>/<k>.srt`) carries the address of
+  the video the player is playing in the header `X-Subsense-Stream` (Media3's current media item, unwrapped from
+  Stremio's local streaming server; a torrent played through that server sends nothing). It goes only to the addon
+  whose subtitle asks, never in an address, and the app never logs it. An addon can read the exact stream the viewer
+  plays instead of looking it up.
+- The one improving entry (`/sub/<id>/1.srt?u=1`) is loaded with `&ssp=1` added (hook on Media3's
+  `MediaItem.SubtitleConfiguration.Builder(Uri)`), so the addon knows that this app swaps the file later and can answer
+  Stremio's own fetch at once with its processing file.
+- The processing line `تتم معالجة الترجمة الآن` is recognised as a processing file (besides the tag).
+
 Picking another subtitle or turning subtitles off hands the screen back to Stremio at once; picking our entry again in
 the same play uses the file already downloaded. A watchdog and error handling hand the screen back on any problem.
 
-Hooks: only Media3 library classes — `PlayerView.setPlayer` and `SubtitleView.setCues` (both patches). Stremio's own code is only
+Hooks: only Media3 library classes — `PlayerView.setPlayer`, `SubtitleView.setCues` (both patches) and
+`MediaItem.SubtitleConfiguration.Builder(Uri)` (auto-refresh, 0.5.0: only the parameter is replaced, before the constructor runs). Stremio's own code is only
 *read*: the subtitle delay, through reflection on its text renderer (`getRenderOffsetMs`); if that ever moves, the delay
 is ignored and everything else keeps working. Addon subtitles reach the player through Stremio's local streaming server
 (`http://127.0.0.1:11470/subtitles.srt?from=<addon url>`); the patch reads the addon's address from that.
