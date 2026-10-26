@@ -86,7 +86,7 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.4.0";
+    static final String PATCH_VERSION = "0.4.1";
     /** What this app can do, sent with every question: the addon never answers with something it cannot handle. */
     static final String CAPS = "versions,follow";
     private static final int PROTOCOL = 1;
@@ -425,7 +425,10 @@ public final class SubtitleRefresh {
             for (int i = 0; i < group.length; i++) {
                 if (!group.isTrackSelected(i)) continue;
                 Format f = group.getTrackFormat(i);
-                if (f.id == null) continue;
+                if (f.id == null) {
+                    log("selected text track has no id");
+                    continue;
+                }
                 // side-loaded tracks get "<period>:" in front of the configuration's id
                 String bare = f.id.matches("^\\d+:.*") ? f.id.substring(f.id.indexOf(':') + 1) : f.id;
                 for (MediaItem.SubtitleConfiguration c : configs) {
@@ -433,9 +436,34 @@ public final class SubtitleRefresh {
                     String address = addonAddress(c.uri);
                     return address != null ? new Selected(f.id, address) : null;
                 }
+                // the phone app gives its subtitles no id: Media3 merges the video (source 0) with one source per
+                // subtitle in order and puts the source's number in front ("2:" = the second subtitle)
+                MediaItem.SubtitleConfiguration c = unnamedConfig(configs, f.id);
+                if (c != null) {
+                    String address = addonAddress(c.uri);
+                    return address != null ? new Selected(f.id, address) : null;
+                }
+                log("selected text track " + f.id + " is none of the " + configs.size() + " side-loaded subtitles");
             }
         }
         return null;
+    }
+
+    /** The id-less configuration a "<source>:…" track id points at (source 1 = the first subtitle), else null. */
+    static MediaItem.SubtitleConfiguration unnamedConfig(List<MediaItem.SubtitleConfiguration> configs, String formatId) {
+        int n = sourceIndex(formatId);
+        if (n < 1 || n > configs.size()) return null;
+        MediaItem.SubtitleConfiguration c = configs.get(n - 1);
+        return c != null && c.id == null ? c : null;
+    }
+
+    /** The leading source number of a merged track id ("2:…" → 2), or -1. */
+    static int sourceIndex(String formatId) {
+        if (formatId == null) return -1;
+        int colon = formatId.indexOf(':');
+        if (colon < 1 || colon > 4) return -1;
+        for (int i = 0; i < colon; i++) if (formatId.charAt(i) < '0' || formatId.charAt(i) > '9') return -1;
+        return Integer.parseInt(formatId.substring(0, colon));
     }
 
     /**

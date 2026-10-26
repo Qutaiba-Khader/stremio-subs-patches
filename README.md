@@ -1,7 +1,7 @@
 # Stremio Subs Patches
 
-[Morphe](https://morphe.software) patches for **Stremio for Android TV 1.11.3** (`com.stremio.one`, the manual-install
-APK from [stremio.com/downloads](https://www.stremio.com/downloads)), made for a SubSense-based subtitle addon whose
+[Morphe](https://morphe.software) patches for **Stremio for Android TV 1.11.3** and **Stremio for Android phones 2.4.0**
+(both `com.stremio.one`, the manual-install APKs from [stremio.com/downloads](https://www.stremio.com/downloads)), made for a SubSense-based subtitle addon whose
 entries can still be "processing" when they are picked.
 
 ## Subtitle auto-refresh
@@ -74,12 +74,19 @@ right there) shows wrong once lines are right to left; the SubSense addon puts s
 
 ## Ready-made APKs
 
-[morphe-builder](https://github.com/Qutaiba-Khader/morphe-builder/releases) publishes two Android TV APKs with each
-release of these patches (and each new Stremio version), both armeabi-v7a (32-bit, which also runs on 64-bit devices):
+[morphe-builder](https://github.com/Qutaiba-Khader/morphe-builder/releases) publishes three APKs with each release of
+these patches (and each new Stremio version):
 
-- `stremio-tv-replacement-subs-…apk` replaces the original: same package `com.stremio.one`, same name "Stremio". It is
-  signed with the builder's own key, not Stremio's, so uninstall the original Stremio once before installing it.
-- `stremio-tv-clone-subs-…apk` installs beside the original: package `com.stremio.one.subs`, named "Stremio Subs".
+- `stremio-tv-replacement-subs-…apk` (Android TV, armeabi-v7a) replaces the original: same package `com.stremio.one`,
+  same name "Stremio". It is signed with the builder's own key, not Stremio's, so uninstall the original Stremio once
+  before installing it.
+- `stremio-tv-clone-subs-…apk` (Android TV, armeabi-v7a, which also runs on 64-bit devices) installs beside the
+  original: package `com.stremio.one.subs`, named "Stremio Subs".
+- `stremio-phone-clone-subs-…apk` (phones, arm64-v8a) installs beside the original Stremio phone app: package
+  `com.stremio.one.subs.phone`, named "Stremio Subs".
+
+The patches work in Stremio's ExoPlayer player, which the Android TV app uses. On a phone ExoPlayer is the default
+(Settings → Default Player): with the mpv or VLC player the patches change nothing.
 
 ## Test build
 
@@ -88,8 +95,8 @@ release of these patches (and each new Stremio version), both armeabi-v7a (32-bi
 `read:packages` (`GITHUB_ACTOR` / `GITHUB_TOKEN`, for the Morphe Gradle plugin) and an Android SDK; the script header lists
 the rest.
 
-Tested on 1.11.3 only. The hooks are in the Media3 library, so other versions will probably patch too, but check.
-The manual-install APK also installs on phones (minSdk 24); the patch was tested that way, on an Android 11 phone.
+Tested on Android TV 1.11.3 and the phone app 2.4.0, both on an Android 11 phone. The hooks are in the Media3 library,
+so other versions will probably patch too, but check.
 
 `test/test-addon.js` is a stand-in for the addon with no real data: one generated test movie (clock burned in) and three
 Arabic entries in the addon's exact shape; entries 2 and 3 serve the addon's processing file until `READY2_S` /

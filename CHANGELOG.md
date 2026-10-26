@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+- Stremio's phone app (2.4.0, same package `com.stremio.one`, same Media3 player as Android TV) is supported. The phone
+  app adds addon subtitles with no id, so "Subtitle auto-refresh" could not tell which addon subtitle was picked and
+  never asked the addon. A picked track is now also matched by its place: Media3 puts each side-loaded subtitle's source
+  number in front of its track id ("2:" = the second subtitle). The TV app (which names its subtitles) is matched as
+  before. A text track that matches nothing is logged.
+- morphe-builder publishes a third APK, a phone copy that installs beside the original Stremio
+  (`com.stremio.one.subs.phone`, "Stremio Subs"). The patches work in the ExoPlayer player only (the phone app's default).
+- Tested on an Android 11 phone (Stremio 2.4.0 phone app, temporary account, stand-in addon, nothing spent): one entry
+  picked while processing → versions 1, 2 and 3 drawn on time with no buffering; a normal Arabic file shows its dash on
+  the right and its "?" on the left.
+
 ## 0.4.0
 - New patch "Right-to-left subtitle lines": Arabic and Hebrew subtitle lines are laid out right to left, so their
   punctuation shows on the right side. At the start of `SubtitleView.setCues` (Media3, the same hook as before)
