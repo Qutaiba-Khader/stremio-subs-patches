@@ -14,17 +14,6 @@ import android.util.Log;
 import android.view.View;
 import android.widget.Toast;
 
-import androidx.media3.common.C;
-import androidx.media3.common.ForwardingPlayer;
-import androidx.media3.common.Format;
-import androidx.media3.common.MediaItem;
-import androidx.media3.common.PlaybackParameters;
-import androidx.media3.common.Player;
-import androidx.media3.common.Tracks;
-import androidx.media3.common.text.Cue;
-import androidx.media3.ui.PlayerView;
-import androidx.media3.ui.SubtitleView;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -32,7 +21,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
-import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -86,7 +74,7 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.5.0";
+    static final String PATCH_VERSION = "0.6.0";
     /**
      * What this app can do, sent with every question: the addon never answers with something it cannot handle. `link`:
      * the question carries the address of the video that is playing (header below), and the one improving entry's own
@@ -132,9 +120,11 @@ public final class SubtitleRefresh {
     /** One play: everything that must die with the player. A newer session makes every older callback a no-op. */
     private static final class Session {
         final int gen;
-        final WeakReference<Player> player;
+        /** Media3's Player (a shrunk app renames it: only M3 touches it). */
+        final WeakReference<Object> player;
         final WeakReference<View> playerView;
-        final Listener listener = new Listener();
+        /** A Player.Listener (M3.listener): every player event looks at the selection and the drawing again. */
+        final Object listener;
         WeakReference<View> subtitleView = new WeakReference<>(null);
         final Report report = new Report();
 
@@ -174,15 +164,21 @@ public final class SubtitleRefresh {
         /** Drawing was handed back after a failure for this address; redrawn from memory at most a few times. */
         String failedFor;
         int redraws;
-        List<Cue> shown = Collections.emptyList();
-        List<Cue> lastStremio = Collections.emptyList();
+        /** Media3 Cue lists. */
+        List<?> shown = Collections.emptyList();
+        List<?> lastStremio = Collections.emptyList();
         long lastTickAt;
         long swappedAt;
+        /** The playback speed, measured from the player's clock while it plays (Media3's own value is not read). */
+        float speed = 1f;
+        long speedAtMs = -1;
+        long speedAtPos;
 
-        Session(int gen, Player p, View v) {
+        Session(int gen, Object p, View v) {
             this.gen = gen;
             this.player = new WeakReference<>(p);
             this.playerView = new WeakReference<>(v);
+            this.listener = M3.listener(() -> playerEvent(this));
         }
     }
 
@@ -248,10 +244,10 @@ public final class SubtitleRefresh {
     // ---------------------------------------------------------------- hooks
 
     /** Start of PlayerView.setPlayer(player). */
-    public static void onPlayerSet(View playerView, Player player) {
+    public static void onPlayerSet(View playerView, Object player) {
         try {
             Session old = session;
-            Player oldPlayer = old != null ? old.player.get() : null;
+            Object oldPlayer = old != null ? old.player.get() : null;
             if (player != null && player == oldPlayer) return;
             if (player == null) {
                 // only the play's own view (or a view that is gone) ends it: another PlayerView being emptied does not
@@ -267,7 +263,7 @@ public final class SubtitleRefresh {
             session = s;
             s.report.hookPlayer = true;
             s.report.stremio = appVersion(playerView);
-            player.addListener(s.listener);
+            M3.addListener(player, s.listener);
             log("player attached (" + player.getClass().getName() + "), session " + s.gen);
             evaluateSelection(s);
         } catch (Throwable t) {
@@ -276,7 +272,7 @@ public final class SubtitleRefresh {
     }
 
     /** Start of SubtitleView.setCues(cues): returns the cues to draw. */
-    public static List<Cue> onSetCues(View subtitleView, List<Cue> cues) {
+    public static List<?> onSetCues(View subtitleView, List<?> cues) {
         if (drawingNow) return cues;
         Session s = session;
         if (s == null) return cues;
@@ -342,49 +338,19 @@ public final class SubtitleRefresh {
 
     // ---------------------------------------------------------------- player events
 
-    private static final class Listener implements Player.Listener {
-        @Override
-        public void onTracksChanged(Tracks tracks) {
-            Session s = session;
-            if (s == null || s.listener != this) return;
-            try {
-                evaluateSelection(s);
-            } catch (Throwable t) {
-                fail("onTracksChanged", t);
-            }
+    /** Any player event: the selection may have changed, and the drawing follows the clock again. */
+    private static void playerEvent(Session s) {
+        if (s != session) return;
+        try {
+            evaluateSelection(s);
+        } catch (Throwable t) {
+            fail("playerEvent", t);
         }
-
-        @Override
-        public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, int reason) {
-            tickSoon(this);
-        }
-
-        @Override
-        public void onIsPlayingChanged(boolean isPlaying) {
-            tickSoon(this);
-        }
-
-        @Override
-        public void onPlaybackParametersChanged(PlaybackParameters parameters) {
-            tickSoon(this);
-        }
-
-        @Override
-        public void onPlaybackStateChanged(int state) {
-            Session s = session;
-            if (s == null || s.listener != this) return;
-            Player p = s.player.get();
-            if (s.swappedAt > 0 && SystemClock.elapsedRealtime() - s.swappedAt < 30000 && state == Player.STATE_BUFFERING) {
-                s.report.bufferingAfterSwap++;
-            }
-            log("playback state " + stateName(state) + " at " + (p != null ? p.getCurrentPosition() : -1) + " ms"
-                    + (s.swappedAt > 0 ? " (" + (SystemClock.elapsedRealtime() - s.swappedAt) + " ms after the swap)" : ""));
-            tickSoon(this);
-        }
+        tickSoon(s);
     }
 
     private static void evaluateSelection(Session s) {
-        Player p = s.player.get();
+        Object p = s.player.get();
         if (p == null) return;
         Selected now = selectedSideLoaded(p);
         String was = s.selected != null ? s.selected.address : null;
@@ -425,47 +391,33 @@ public final class SubtitleRefresh {
         if (base != null) startAsking(s, new Ask(now.address, originOf(base), pathOf(base) + "/patch/v1/subtitle", true, base));
     }
 
-    /** The selected text track when it is a side-loaded subtitle, with the addon's own address. */
-    private static Selected selectedSideLoaded(Player p) {
-        MediaItem item = p.getCurrentMediaItem();
-        if (item == null || item.localConfiguration == null) return null;
-        List<MediaItem.SubtitleConfiguration> configs = item.localConfiguration.subtitleConfigurations;
-        if (configs == null || configs.isEmpty()) return null;
-        for (Tracks.Group group : p.getCurrentTracks().getGroups()) {
-            if (group.getType() != C.TRACK_TYPE_TEXT || !group.isSelected()) continue;
-            for (int i = 0; i < group.length; i++) {
-                if (!group.isTrackSelected(i)) continue;
-                Format f = group.getTrackFormat(i);
-                if (f.id == null) {
-                    log("selected text track has no id");
+    /**
+     * The selected text track when it is a side-loaded subtitle, with the addon's own address. Media3 merges the video
+     * (source 0) with one source per side-loaded subtitle, in order, and puts the source's number in front of every track
+     * id ("2:…" = the second subtitle): the number gives the subtitle, whether or not the app names its subtitles.
+     */
+    private static Selected selectedSideLoaded(Object p) {
+        List<?> configs = M3.subtitleConfigs(M3.localConfig(M3.mediaItem(p)));
+        if (configs.isEmpty()) return null;
+        for (Object group : M3.groups(M3.tracks(p))) {
+            boolean[] selected = M3.selectedFlags(group);
+            if (selected == null) continue;
+            Object[] formats = null;
+            for (int i = 0; i < selected.length; i++) {
+                if (!selected[i]) continue;
+                if (formats == null) formats = M3.formats(group);
+                String id = i < formats.length ? M3.formatId(formats[i]) : null;
+                int n = sourceIndex(id);
+                if (n < 1) continue; // the video's own tracks (source 0) or no id
+                if (n > configs.size()) {
+                    log("selected track " + id + " is none of the " + configs.size() + " side-loaded subtitles");
                     continue;
                 }
-                // side-loaded tracks get "<period>:" in front of the configuration's id
-                String bare = f.id.matches("^\\d+:.*") ? f.id.substring(f.id.indexOf(':') + 1) : f.id;
-                for (MediaItem.SubtitleConfiguration c : configs) {
-                    if (c.id == null || !(c.id.equals(bare) || c.id.equals(f.id))) continue;
-                    String address = addonAddress(c.uri);
-                    return address != null ? new Selected(f.id, address) : null;
-                }
-                // the phone app gives its subtitles no id: Media3 merges the video (source 0) with one source per
-                // subtitle in order and puts the source's number in front ("2:" = the second subtitle)
-                MediaItem.SubtitleConfiguration c = unnamedConfig(configs, f.id);
-                if (c != null) {
-                    String address = addonAddress(c.uri);
-                    return address != null ? new Selected(f.id, address) : null;
-                }
-                log("selected text track " + f.id + " is none of the " + configs.size() + " side-loaded subtitles");
+                String address = addonAddress(M3.uriOf(configs.get(n - 1)));
+                return address != null ? new Selected(id, address) : null;
             }
         }
         return null;
-    }
-
-    /** The id-less configuration a "<source>:…" track id points at (source 1 = the first subtitle), else null. */
-    static MediaItem.SubtitleConfiguration unnamedConfig(List<MediaItem.SubtitleConfiguration> configs, String formatId) {
-        int n = sourceIndex(formatId);
-        if (n < 1 || n > configs.size()) return null;
-        MediaItem.SubtitleConfiguration c = configs.get(n - 1);
-        return c != null && c.id == null ? c : null;
     }
 
     /** The leading source number of a merged track id ("2:…" → 2), or -1. */
@@ -500,7 +452,8 @@ public final class SubtitleRefresh {
     }
 
     /**
-     * Start of Media3 MediaItem.SubtitleConfiguration.Builder(uri): returns the address to load. Only the addon's one
+     * End of Media3's MediaItem.SubtitleConfiguration constructor (its Uri is set again to what this returns): the address to
+     * load. Only the addon's one
      * improving entry (/sub/<id>/1.srt?u=1) is changed: `ssp=1` is added, which tells the addon that this app swaps the
      * file later, so its own fetch may be answered at once with the processing file. Any other address stays as it is.
      */
@@ -533,12 +486,12 @@ public final class SubtitleRefresh {
      * The address of the video that is playing (Media3's current media item), unwrapped from Stremio's local streaming
      * server; null when there is none or it is not http(s). Main thread only.
      */
-    static String playingLink(Player p) {
+    static String playingLink(Object p) {
         try {
             if (p == null) return null;
-            MediaItem item = p.getCurrentMediaItem();
-            if (item == null || item.localConfiguration == null) return null;
-            String link = addonAddress(item.localConfiguration.uri);
+            Uri uri = M3.uriOf(M3.localConfig(M3.mediaItem(p)));
+            if (uri == null) return null;
+            String link = addonAddress(uri);
             if (link == null || link.length() > MAX_LINK) return null;
             String host = Uri.parse(link).getHost();
             // a torrent played through Stremio's own server has no outside address to give
@@ -559,11 +512,12 @@ public final class SubtitleRefresh {
     // ---------------------------------------------------------------- the placeholder's tag
 
     /** "ssx1 <path>" written in Unicode tag characters (U+E0020…U+E007E, invisible) anywhere in the cues. */
-    static String tagIn(List<Cue> cues) {
+    static String tagIn(List<?> cues) {
         if (cues == null) return null;
-        for (Cue c : cues) {
-            if (c == null || c.text == null) continue;
-            String found = decodeTag(c.text.toString());
+        for (Object c : cues) {
+            CharSequence text = M3.cueText(c);
+            if (text == null) continue;
+            String found = decodeTag(text.toString());
             if (found != null) return found;
         }
         return null;
@@ -583,10 +537,11 @@ public final class SubtitleRefresh {
         return path.startsWith("/") && !path.startsWith("//") && path.length() < 300 ? path : null;
     }
 
-    private static boolean isPlaceholderText(List<Cue> cues) {
+    private static boolean isPlaceholderText(List<?> cues) {
         if (cues == null) return false;
-        for (Cue c : cues) {
-            if (c != null && c.text != null && isPlaceholderLine(c.text.toString())) return true;
+        for (Object c : cues) {
+            CharSequence text = M3.cueText(c);
+            if (text != null && isPlaceholderLine(text.toString())) return true;
         }
         return false;
     }
@@ -636,8 +591,8 @@ public final class SubtitleRefresh {
         }
         if (a.busy) return;
         a.busy = true;
-        Player pl = s.player.get();
-        a.posMs = pl != null ? Math.max(0, pl.getCurrentPosition()) : -1; // where the viewer is (an addon may work from there)
+        Object pl = s.player.get();
+        a.posMs = pl != null ? Math.max(0, M3.position(pl)) : -1; // where the viewer is (an addon may work from there)
         // the video's address goes only with a question about one of the addon's own entries (/sub/<id>/<k>.srt)
         a.streamLink = statePathFor(a.address) != null ? playingLink(pl) : null;
         final int gen = s.gen;
@@ -756,7 +711,7 @@ public final class SubtitleRefresh {
                         s.nextAsk = a;
                         s.nextVersion = r.version;
                         s.nextRepliedAt = r.repliedAt;
-                        tickSoon(s.listener);
+                        tickSoon(s);
                     } else if (!overProcessing && had == 0 && !a.generic && !s.lastStremio.isEmpty()) {
                         // the first version over Stremio's own copy of this subtitle: at the next gap in its lines
                         s.firstLines = r.lines;
@@ -1150,10 +1105,10 @@ public final class SubtitleRefresh {
             MAIN.removeCallbacks(FIRST_DEADLINE);
         }
         s.shown = Collections.emptyList();
-        Player p = s.player.get();
+        Object p = s.player.get();
         if (toast != null) {
             s.swappedAt = SystemClock.elapsedRealtime();
-            log("swapped at " + (p != null ? p.getCurrentPosition() : -1) + " ms, text delay " + textDelayMs(s) + " ms");
+            log("swapped at " + (p != null ? M3.position(p) : -1) + " ms, text delay " + textDelayMs(s) + " ms");
             showToast(s, toast);
         }
         tick(s);
@@ -1206,9 +1161,8 @@ public final class SubtitleRefresh {
         log("Stremio draws again: " + why);
     }
 
-    private static void tickSoon(Listener from) {
-        Session s = session;
-        if (s == null || s.listener != from || s.drawing == null) return;
+    private static void tickSoon(Session s) {
+        if (s == null || s != session || s.drawing == null) return;
         MAIN.removeCallbacks(TICK);
         MAIN.post(TICK);
     }
@@ -1217,7 +1171,7 @@ public final class SubtitleRefresh {
         MAIN.removeCallbacks(TICK);
         if (s == null || s != session || s.drawing == null) return;
         try {
-            Player p = s.player.get();
+            Object p = s.player.get();
             View v = subtitleViewOf(s);
             if (p == null || v == null) {
                 release(s, "player or view gone", false);
@@ -1228,24 +1182,27 @@ public final class SubtitleRefresh {
                 return;
             }
             Line[] lines = s.drawing;
-            long t = p.getCurrentPosition() - textDelayMs(s); // Stremio shows a line at T when position − delay = T
+            long pos = M3.position(p);
+            boolean playing = M3.playing(p);
+            measureSpeed(s, pos, playing);
+            long t = pos - textDelayMs(s); // Stremio shows a line at T when position − delay = T
             if (s.nextLines != null && (inGap(lines, t, s.nextGapMs) || SystemClock.uptimeMillis() - s.nextSince >= s.nextMaxWaitMs)) {
                 // a newer version: switched in while no line is on screen, so nothing jumps under the viewer's eyes
                 lines = s.nextLines;
                 s.drawing = lines;
                 s.nextLines = null;
-                log("upgraded the drawn subtitle at " + p.getCurrentPosition() + " ms (" + lines.length + " lines)");
+                log("upgraded the drawn subtitle at " + pos + " ms (" + lines.length + " lines)");
                 showToast(s, s.nextToast);
                 s.nextToast = null;
                 if (s.nextAsk != null) s.report.swap(s.nextAsk, SystemClock.elapsedRealtime() - s.nextRepliedAt, s.nextVersion);
                 s.nextAsk = null;
             }
-            List<Cue> now = new ArrayList<>(2);
+            List<Object> now = new ArrayList<>(2);
             long next = Long.MAX_VALUE;
             int i = lastStartingBy(lines, t);
             for (int k = Math.max(0, i - 8); k <= i; k++) {
                 if (lines[k].end > t) {
-                    now.add(new Cue.Builder().setText(lines[k].text).build());
+                    now.add(M3.newCue(lines[k].text));
                     next = Math.min(next, lines[k].end);
                 }
             }
@@ -1254,9 +1211,8 @@ public final class SubtitleRefresh {
             if (!sameText(now, s.shown)) draw(s, now);
             s.lastTickAt = SystemClock.uptimeMillis(); // the Handler's own clock: it stops while the device sleeps
             long wait;
-            if (p.isPlaying()) {
-                float speed = p.getPlaybackParameters().speed;
-                wait = next == Long.MAX_VALUE ? 1000 : (long) ((next - t) / Math.max(0.25f, speed));
+            if (playing) {
+                wait = next == Long.MAX_VALUE ? 1000 : (long) ((next - t) / Math.max(0.25f, s.speed));
                 wait = Math.max(10, Math.min(1000, wait));
             } else {
                 wait = 500;
@@ -1276,6 +1232,26 @@ public final class SubtitleRefresh {
         return nextStart - t >= gapMs;
     }
 
+    /**
+     * The playback speed from the player's clock: how far the position moved over the time since the last tick while
+     * playing (Media3's PlaybackParameters are not read). Only a clear change counts: 1 stays 1 within 10 %.
+     */
+    static void measureSpeed(Session s, long pos, boolean playing) {
+        long now = SystemClock.uptimeMillis();
+        if (!playing) {
+            s.speedAtMs = -1;
+            return;
+        }
+        if (s.speedAtMs >= 0 && now - s.speedAtMs >= 400) {
+            float est = (pos - s.speedAtPos) / (float) (now - s.speedAtMs);
+            if (est > 0.2f && est < 4.5f) s.speed = Math.abs(est - 1f) < 0.1f ? 1f : est; // a seek gives no reading
+        }
+        if (s.speedAtMs < 0 || now - s.speedAtMs >= 400) {
+            s.speedAtMs = now;
+            s.speedAtPos = pos;
+        }
+    }
+
     /** The tick must have run recently while we draw; if the main loop lost it, draw again or step aside. */
     private static void watchdog() {
         Session s = session;
@@ -1293,9 +1269,9 @@ public final class SubtitleRefresh {
         View v = s.subtitleView.get();
         if (v == null) {
             View pv = s.playerView.get();
-            if (pv instanceof PlayerView) v = ((PlayerView) pv).getSubtitleView();
+            if (pv != null && M3.playerViewType().isInstance(pv)) v = M3.subtitleViewOf(pv);
         }
-        return v instanceof SubtitleView ? v : null;
+        return v != null && M3.subtitleViewType().isInstance(v) ? v : null;
     }
 
     private static int lastStartingBy(Line[] lines, long t) {
@@ -1314,21 +1290,21 @@ public final class SubtitleRefresh {
         return ans;
     }
 
-    private static boolean sameText(List<Cue> a, List<Cue> b) {
+    private static boolean sameText(List<?> a, List<?> b) {
         if (a.size() != b.size()) return false;
         for (int i = 0; i < a.size(); i++) {
-            if (!String.valueOf(a.get(i).text).equals(String.valueOf(b.get(i).text))) return false;
+            if (!String.valueOf(M3.cueText(a.get(i))).equals(String.valueOf(M3.cueText(b.get(i))))) return false;
         }
         return true;
     }
 
-    private static void draw(Session s, List<Cue> cues) {
+    private static void draw(Session s, List<?> cues) {
         if (s.drawing != null) s.shown = cues;
         View v = subtitleViewOf(s);
         if (v == null) return;
         drawingNow = true;
         try {
-            ((SubtitleView) v).setCues(cues);
+            M3.setCues(v, cues);
         } finally {
             drawingNow = false;
         }
@@ -1337,32 +1313,27 @@ public final class SubtitleRefresh {
     // ---------------------------------------------------------------- Stremio's subtitle delay (read only)
 
     private static WeakReference<Object> textRendererRef = new WeakReference<>(null);
-    private static Method offsetMethod;
 
-    /** Stremio keeps the subtitle delay in its own text renderer (getRenderOffsetMs); 0 when it cannot be read. */
+    /**
+     * Stremio keeps the subtitle delay in its own text renderer (1.11.3: getRenderOffsetMs; 1.12.0: the one long of the
+     * renderer that wraps Media3's TextRenderer, in µs); 0 when it cannot be read.
+     */
     private static long textDelayMs(Session s) {
-        Player p = s.player.get();
+        Object p = s.player.get();
         if (p == null) return 0;
         try {
             Object r = textRendererRef.get();
             if (r == null) {
-                Object exo = p instanceof ForwardingPlayer ? ((ForwardingPlayer) p).getWrappedPlayer() : p;
-                Method count = exo.getClass().getMethod("getRendererCount");
-                Method get = exo.getClass().getMethod("getRenderer", int.class);
-                int n = (Integer) count.invoke(exo);
-                for (int i = 0; i < n && r == null; i++) {
-                    Object x = get.invoke(exo, i);
-                    if (x != null && x.getClass().getName().endsWith("CustomTextRenderer")) r = x;
-                }
+                r = M3.findTextRenderer(p);
                 if (r == null) {
                     s.report.delayReadable = false;
                     return 0;
                 }
-                offsetMethod = r.getClass().getMethod("getRenderOffsetMs");
                 textRendererRef = new WeakReference<>(r);
             }
+            long ms = M3.delayMs(r);
             s.report.delayReadable = true;
-            return (Long) offsetMethod.invoke(r);
+            return ms;
         } catch (Throwable t) {
             s.report.delayReadable = false;
             return 0;
@@ -1378,6 +1349,7 @@ public final class SubtitleRefresh {
         Boolean delayReadable;
         int placeholders;
         int releases;
+        /** Not measured since 0.6.0 (Media3's playback state is no longer read): always 0. */
         int bufferingAfterSwap;
         String lastError;
         /** The addon the last error came from (null = the drawing). */
@@ -1410,10 +1382,10 @@ public final class SubtitleRefresh {
         s.firstLines = null;
         MAIN.removeCallbacks(FIRST_DEADLINE);
         for (Ask a : s.asks.values()) cancel(a); // nothing more is asked for a play that ended
-        Player p = s.player.get();
+        Object p = s.player.get();
         if (p != null) {
             try {
-                p.removeListener(s.listener);
+                M3.removeListener(p, s.listener);
             } catch (Throwable ignored) {
                 // the old player may be released already
             }
@@ -1483,16 +1455,6 @@ public final class SubtitleRefresh {
             return c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionName;
         } catch (Throwable t) {
             return "";
-        }
-    }
-
-    private static String stateName(int s) {
-        switch (s) {
-            case Player.STATE_IDLE: return "IDLE";
-            case Player.STATE_BUFFERING: return "BUFFERING";
-            case Player.STATE_READY: return "READY";
-            case Player.STATE_ENDED: return "ENDED";
-            default: return String.valueOf(s);
         }
     }
 

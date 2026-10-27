@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0
+- Stremio for Android TV 1.12.0 is supported. 1.12.0 shrinks and renames Media3 with R8 (`Player`, `MediaItem`, `Cue`,
+  `PlayerView`… get short names that change with every release), so the extension no longer names any Media3 class: it
+  reaches Media3 through one bridge class (`M3`) whose stand-in methods the patch writes when patching, from the app's own
+  members found by their structure, never their names. The rest is read by reflection on field types. The same patch
+  still applies to Android TV 1.11.3 and the phone app 2.4.0.
+- The subtitle-address hook moved from `SubtitleConfiguration.Builder(Uri)` (inlined away in 1.12.0) to the end of the
+  `SubtitleConfiguration` constructor: only its Uri is set again (`&ssp=1` on the one improving entry).
+- A picked subtitle is matched by its source number in the track id ("2:" = the second side-loaded subtitle) for every
+  app; player events reach the patch through a proxy listener; the playback speed is measured from the player's clock.
+  `bufferingAfterSwap` in the report is no longer measured (always 0).
+- The subtitle delay is read from 1.12.0's renderer too (its one long field, µs).
+- Stand-in addon: `TOAST="text"` sends a swap notice (default none).
+- Tested on the A50 with Stremio TV 1.12.0 (temporary account, nothing spent): the stand-in's one entry processing →
+  versions 1, 2, 3 drawn on the video clock; toast shown when the addon sends one and none when it sends `""`; right-to-left
+  lines in Stremio's own drawing and in ours; delay readable. End to end with the real addon's code offline (stored Toy
+  Story 5 run, every outgoing connection refused): `ssp=1` → processing file in 4 ms → version ready → swapped 465 ms after
+  ready, lines on time. Patched without errors: TV 1.12.0, TV 1.11.3, phone 2.4.0.
+
 ## 0.5.0
 - The questions about the addon's own entries carry the address of the video that is playing (header
   `X-Subsense-Stream`, caps `link`): the addon reads the exact stream the viewer plays. Sent only to the addon whose

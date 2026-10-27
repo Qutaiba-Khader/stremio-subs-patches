@@ -11,7 +11,7 @@
 // VERSIONS="0,40,90" seconds after the list call (any number of versions); BROKEN_AFTER=s: past that time every version
 // not yet ready is dropped (a promised version that never comes); SILENT_AFTER=s: past that time the versions question
 // never answers (an addon gone silent; the app's promise expires after NEXTBY_S, default 1800). Each version's lines say
-// which version they are.
+// which version they are. TOAST="text": the swap notice (default none).
 const http = require('node:http');
 const fs = require('node:fs');
 
@@ -25,6 +25,8 @@ const VERSIONS = String(process.env.VERSIONS || '0,40,90').split(',').map(Number
 const BROKEN_AFTER = process.env.BROKEN_AFTER ? Number(process.env.BROKEN_AFTER) : null;
 const SILENT_AFTER = process.env.SILENT_AFTER ? Number(process.env.SILENT_AFTER) : null;
 const NEXTBY_MS = Number(process.env.NEXTBY_S || 1800) * 1000;
+// TOAST="text": the notice the app shows on each swap (unset = "" = none, like the addon since D92)
+const TOAST = process.env.TOAST || '';
 const jobs = new Map(); // jobId → created (ms)
 const served = new Map(); // ONE=1: jobId → the version the one entry's fetch served (0 = processing file), like the addon (D77)
 
@@ -126,7 +128,7 @@ http.createServer((req, res) => {
                 if (vs.best) {
                     log(`  → version ${vs.best}${vs.more ? ' (more may follow)' : ' (the last)'}`);
                     return json(res, { ...base, op: 'replace', file: `/sub/${job}/${vs.best}.srt`, version: vs.best, more: vs.more, ...(vs.more ? { nextBy: NEXTBY_MS } : {}),
-                        toast: '', swap: { gapMs: 400, maxWaitMs: 8000 } });
+                        toast: TOAST, swap: { gapMs: 400, maxWaitMs: 8000 } });
                 }
                 log(`  → ${vs.more ? 'wait' : 'stop (nothing more)'}`);
                 return json(res, vs.more ? { ...base, op: 'wait', version: have, more: true, nextBy: NEXTBY_MS } : { ...base, op: 'stop', version: have, more: false });

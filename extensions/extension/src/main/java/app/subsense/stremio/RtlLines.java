@@ -3,8 +3,6 @@ package app.subsense.stremio;
 import android.text.SpannableStringBuilder;
 import android.util.Log;
 
-import androidx.media3.common.text.Cue;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -14,8 +12,8 @@ import java.util.List;
  * it (BidiUtils.wrapText). An Arabic or Hebrew line then shows its punctuation on the wrong side ("-مرحبا" shows the
  * dash on the left). At the start of SubtitleView.setCues this drops Stremio's mark and wraps every line whose first
  * letter is right-to-left in a right-to-left embedding (U+202B … U+202C), which both of those keep. Lines that already
- * start with an embedding or isolate are left as they are. Only Media3's Cue is used; nothing of Stremio's own code is
- * read. Any failure leaves the cues exactly as they came.
+ * start with an embedding or isolate are left as they are. Only Media3's Cue is used (through M3: a shrunk app renames
+ * it); nothing of Stremio's own code is read. Any failure leaves the cues exactly as they came.
  */
 public final class RtlLines {
     private static final String TAG = "SubsRtl";
@@ -28,15 +26,15 @@ public final class RtlLines {
     }
 
     /** Start of SubtitleView.setCues(cues): returns the cues to draw (the same list when nothing needed changing). */
-    public static List<Cue> fix(List<Cue> cues) {
+    public static List<?> fix(List<?> cues) {
         if (cues == null || cues.isEmpty()) return cues;
         try {
-            List<Cue> out = null;
+            List<Object> out = null;
             for (int i = 0; i < cues.size(); i++) {
-                Cue cue = cues.get(i);
-                CharSequence fixed = cue == null ? null : fixText(cue.text);
+                Object cue = cues.get(i);
+                CharSequence fixed = cue == null ? null : fixText(M3.cueText(cue));
                 if (fixed != null && out == null) out = new ArrayList<>(cues.subList(0, i));
-                if (out != null) out.add(fixed != null ? cue.buildUpon().setText(fixed).build() : cue);
+                if (out != null) out.add(fixed != null ? M3.withText(cue, fixed) : cue);
             }
             if (out == null) return cues;
             if (!logged) {

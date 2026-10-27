@@ -1,6 +1,6 @@
 # Stremio Subs Patches
 
-[Morphe](https://morphe.software) patches for **Stremio for Android TV 1.11.3** and **Stremio for Android phones 2.4.0**
+[Morphe](https://morphe.software) patches for **Stremio for Android TV 1.12.0** (and 1.11.3) and **Stremio for Android phones 2.4.0**
 (both `com.stremio.one`, the manual-install APKs from [stremio.com/downloads](https://www.stremio.com/downloads)), made for a SubSense-based subtitle addon whose
 entries can still be "processing" when they are picked.
 
@@ -53,18 +53,30 @@ assumes how many versions there are: the addon's answers decide.
   Stremio's local streaming server; a torrent played through that server sends nothing). It goes only to the addon
   whose subtitle asks, never in an address, and the app never logs it. An addon can read the exact stream the viewer
   plays instead of looking it up.
-- The one improving entry (`/sub/<id>/1.srt?u=1`) is loaded with `&ssp=1` added (hook on Media3's
-  `MediaItem.SubtitleConfiguration.Builder(Uri)`), so the addon knows that this app swaps the file later and can answer
+- The one improving entry (`/sub/<id>/1.srt?u=1`) is loaded with `&ssp=1` added (hook at the end of Media3's
+  `MediaItem.SubtitleConfiguration` constructor since 0.6.0), so the addon knows that this app swaps the file later and can answer
   Stremio's own fetch at once with its processing file.
 - The processing line `تتم معالجة الترجمة الآن` is recognised as a processing file (besides the tag).
 
 Picking another subtitle or turning subtitles off hands the screen back to Stremio at once; picking our entry again in
 the same play uses the file already downloaded. A watchdog and error handling hand the screen back on any problem.
 
-Hooks: only Media3 library classes — `PlayerView.setPlayer`, `SubtitleView.setCues` (both patches) and
-`MediaItem.SubtitleConfiguration.Builder(Uri)` (auto-refresh, 0.5.0: only the parameter is replaced, before the constructor runs). Stremio's own code is only
-*read*: the subtitle delay, through reflection on its text renderer (`getRenderOffsetMs`); if that ever moves, the delay
-is ignored and everything else keeps working. Addon subtitles reach the player through Stremio's local streaming server
+Hooks: only Media3 library classes — `PlayerView.setPlayer`, `SubtitleView.setCues` (both patches) and the end of the
+`MediaItem.SubtitleConfiguration` constructor (auto-refresh: only its Uri is set again). Stremio's own code is only
+*read*: the subtitle delay, from its text renderer (1.11.3: `getRenderOffsetMs`; 1.12.0: the one long field of the
+renderer that wraps Media3's `TextRenderer`); if that ever moves, the delay is ignored and everything else keeps working.
+
+**Shrunk apps (0.6.0).** Android TV 1.12.0 shrinks Media3 with R8: `Player`, `MediaItem`, `Cue`, `PlayerView`… get short
+names that change with every release (only `SubtitleView` and a few members keep theirs). So the extension never names a
+Media3 class: it reaches Media3 through one bridge class (`M3.java`) whose stand-in methods the patch replaces, when
+patching, with calls to the app's own members, each found by its structure — `PlayerView` is the class with
+`getSubtitleView()` and a one-argument `setPlayer`, the Player is that argument, add/removeListener are the calls on it
+in `setPlayer`, `SubtitleConfiguration` is the class with one final Uri, four Strings and two ints, `Tracks.Group` the one
+built from (TrackGroup, boolean, int[], boolean[]), `Format.id` the first String its `toString()` reads, `Cue` the class
+built from (CharSequence, Alignment, Alignment, Bitmap, …), and so on (`SubtitleRefreshPatch.kt`). The rest is read by
+reflection on field types. A release where one is not found fails the patch instead of shipping a broken app. The same
+code patches the unshrunk 1.11.3 and the phone app 2.4.0. The player's events reach the patch through a proxy listener
+(any event: the selection and the drawing are looked at again); the playback speed is measured from the player's clock. Addon subtitles reach the player through Stremio's local streaming server
 (`http://127.0.0.1:11470/subtitles.srt?from=<addon url>`); the patch reads the addon's address from that.
 
 ## Right-to-left subtitle lines (0.4.0)
@@ -108,12 +120,8 @@ The patches work in Stremio's ExoPlayer player, which the Android TV app uses. O
 `read:packages` (`GITHUB_ACTOR` / `GITHUB_TOKEN`, for the Morphe Gradle plugin) and an Android SDK; the script header lists
 the rest.
 
-Tested on Android TV 1.11.3 and the phone app 2.4.0, both on an Android 11 phone. The hooks are in the Media3 library,
-so other versions will probably patch too, but check.
-
-**Android TV 1.12.0 is not supported yet:** it shrinks and renames Media3 (the player, the media item and the subtitle
-line classes; `PlayerView` is gone), so "Subtitle auto-refresh" does not match it. Patch Android TV 1.11.3 meanwhile;
-morphe-builder builds the TV APKs from 1.11.3.
+Tested on Android TV 1.12.0 (0.6.0) and 1.11.3 and the phone app 2.4.0, on an Android 11 phone. Later releases are
+patched by structure, not by name, so they will probably patch too; a release whose Media3 changed shape fails the patch.
 
 `test/test-addon.js` is a stand-in for the addon with no real data: one generated test movie (clock burned in) and three
 Arabic entries in the addon's exact shape; entries 2 and 3 serve the addon's processing file until `READY2_S` /
