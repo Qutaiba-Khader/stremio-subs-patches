@@ -15,7 +15,7 @@
 - Stand-in addon: `TOAST="text"` sends a swap notice (default none).
 - Tested on the A50 with Stremio TV 1.12.0 (temporary account, nothing spent): the stand-in's one entry processing →
   versions 1, 2, 3 drawn on the video clock; toast shown when the addon sends one and none when it sends `""`; right-to-left
-  lines in Stremio's own drawing and in ours; delay readable. End to end with the real addon's code offline (stored Toy
+  lines in Stremio's own drawing and in ours; a +2 s Stremio subtitle delay moved our drawn lines by 2 s (TV 1.12.0 and phone 2.4.0). End to end with the real addon's code offline (stored Toy
   Story 5 run, every outgoing connection refused): `ssp=1` → processing file in 4 ms → version ready → swapped 465 ms after
   ready, lines on time. Patched without errors: TV 1.12.0, TV 1.11.3, phone 2.4.0.
 
