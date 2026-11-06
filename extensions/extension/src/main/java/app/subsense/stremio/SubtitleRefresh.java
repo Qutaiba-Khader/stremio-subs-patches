@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -80,7 +81,7 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.7.1";
+    static final String PATCH_VERSION = "0.7.2";
     /**
      * What this app can do, sent with every question: the addon never answers with something it cannot handle. `link`:
      * the question carries the address of the video that is playing (header below), and the one improving entry's own
@@ -197,6 +198,11 @@ public final class SubtitleRefresh {
         float speed = 1f;
         long speedAtMs = -1;
         long speedAtPos;
+        /** 0.7.2: the player's screen (its Activity) and whether it is in the background now (stopped: another app is shown). */
+        WeakReference<android.app.Activity> activity = new WeakReference<>(null);
+        Class<?> activityClass;
+        boolean away;
+        long awaySince;
 
         Session(int gen, Object p, View v) {
             this.gen = gen;
@@ -224,7 +230,7 @@ public final class SubtitleRefresh {
         final boolean generic;
         /** The addon's base (for the report). */
         final String base;
-        final long startedAt = SystemClock.elapsedRealtime();
+        long startedAt = SystemClock.elapsedRealtime(); // moved on by the time the player's screen spent in the background
         long errorDelay = RETRY_MS;
         volatile boolean placeholderSeen;
         boolean busy;
@@ -592,6 +598,7 @@ public final class SubtitleRefresh {
 
     private static void poll(Session s, Ask a) {
         if (s != session || s.asks.get(a.address) != a) return;
+        if (s.away) return; // 0.7.2: nothing is asked while the player's screen is in the background (asked again on return)
         if (a.pending != null) { // asked now: the scheduled question is not needed any more
             MAIN.removeCallbacks(a.pending);
             a.pending = null;
@@ -643,6 +650,8 @@ public final class SubtitleRefresh {
     /** The next question for `a` in `delayMs`; replaces any question already scheduled, holds no play's state. */
     private static void pollLater(Session s, Ask a, long delayMs) {
         if (a.pending != null) MAIN.removeCallbacks(a.pending);
+        a.pending = null;
+        if (s.away) return; // 0.7.2: asked again when the player's screen comes back
         final int gen = s.gen;
         a.pending = () -> {
             a.pending = null;
@@ -754,7 +763,16 @@ public final class SubtitleRefresh {
                         s.firstVersion = r.version;
                         s.firstRepliedAt = r.repliedAt;
                         MAIN.removeCallbacks(FIRST_DEADLINE);
-                        MAIN.postDelayed(FIRST_DEADLINE, maxWait);
+                        if (!s.away) MAIN.postDelayed(FIRST_DEADLINE, maxWait);
+                    } else if (s.away) {
+                        // 0.7.2: a version that came while the player's screen is in the background is drawn (with its
+                        // notice) when the screen comes back
+                        s.firstLines = r.lines;
+                        s.firstFor = a.address;
+                        s.firstToast = toast;
+                        s.firstAsk = a;
+                        s.firstVersion = r.version;
+                        s.firstRepliedAt = r.repliedAt;
                     } else {
                         startDrawing(s, a.address, r.lines, toast);
                         s.report.swap(a, SystemClock.elapsedRealtime() - r.repliedAt, r.version);
@@ -1154,7 +1172,7 @@ public final class SubtitleRefresh {
         }
         tick(s);
         MAIN.removeCallbacks(WATCHDOG);
-        MAIN.postDelayed(WATCHDOG, WATCHDOG_MS);
+        if (!s.away) MAIN.postDelayed(WATCHDOG, WATCHDOG_MS);
     }
 
     private static final Runnable FIRST_DEADLINE = () -> {
@@ -1344,6 +1362,12 @@ public final class SubtitleRefresh {
                 if (!(c instanceof android.content.ContextWrapper)) break;
             }
             if (act == null) return;
+            Session s = session;
+            if (s != null && s.playerView.get() == playerView) {
+                s.activity = new WeakReference<>(act);
+                s.activityClass = act.getClass();
+            }
+            watchLifecycle(act);
             android.view.Window w = act.getWindow();
             android.view.Window.Callback cb = w.getCallback();
             if (cb == null || cb instanceof KeyWatch) return;
@@ -1355,13 +1379,110 @@ public final class SubtitleRefresh {
     }
     private static final Runnable DELAY_WATCH = () -> delayWatch(session);
 
+    // ---------------------------------------------------------------- 0.7.2: the player's screen in the background
+
+    private static boolean lifecycleWatched;
+
+    /**
+     * Stremio keeps its player (paused) when the viewer goes to another app, so the play's session went on in the
+     * background: questions held at the addon, new versions downloaded and swapped in, and the drawing, delay and watchdog
+     * timers on the main thread — for as long as the app stayed in memory. Now the session waits while the player's screen
+     * is stopped (nothing is asked, no timer runs) and goes on where it was when the screen comes back; a screen that is
+     * closed for good ends it.
+     */
+    private static void watchLifecycle(android.app.Activity act) {
+        if (lifecycleWatched) return;
+        act.getApplication().registerActivityLifecycleCallbacks(new android.app.Application.ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(android.app.Activity a, Bundle b) { }
+            @Override public void onActivityResumed(android.app.Activity a) { }
+            @Override public void onActivityPaused(android.app.Activity a) { }
+            @Override public void onActivitySaveInstanceState(android.app.Activity a, Bundle b) { }
+
+            @Override
+            public void onActivityStarted(android.app.Activity a) {
+                Session s = session;
+                if (s == null || !s.away) return;
+                android.app.Activity was = s.activity.get();
+                // the same screen, or a new copy of it (Android recreated it, e.g. on a rotation): the play goes on
+                if (a == was || (s.activityClass != null && a.getClass() == s.activityClass && (was == null || was.isDestroyed()))) {
+                    s.activity = new WeakReference<>(a);
+                    comeBack(s);
+                }
+            }
+
+            @Override
+            public void onActivityStopped(android.app.Activity a) {
+                Session s = session;
+                if (s != null && !s.away && a == s.activity.get()) goAway(s);
+            }
+
+            @Override
+            public void onActivityDestroyed(android.app.Activity a) {
+                Session s = session;
+                if (s != null && a == s.activity.get() && a.isFinishing()) endSession(s, "the player's screen closed");
+            }
+        });
+        lifecycleWatched = true;
+    }
+
+    private static void goAway(Session s) {
+        try {
+            s.away = true;
+            s.awaySince = SystemClock.elapsedRealtime();
+            if (s.delayPending) sendDelay(s, "end"); // an adjustment not sent yet is final now
+            MAIN.removeCallbacks(TICK);
+            MAIN.removeCallbacks(WATCHDOG);
+            MAIN.removeCallbacks(DELAY_WATCH);
+            MAIN.removeCallbacks(FIRST_DEADLINE); // a queued first version waits for the screen too
+            for (Ask a : s.asks.values()) {
+                if (a.pending != null) {
+                    MAIN.removeCallbacks(a.pending);
+                    a.pending = null;
+                }
+            }
+            log("the player's screen is in the background: nothing is asked and no timer runs until it comes back");
+        } catch (Throwable t) {
+            fail("goAway", t);
+        }
+    }
+
+    private static void comeBack(Session s) {
+        try {
+            long away = SystemClock.elapsedRealtime() - s.awaySince;
+            s.away = false;
+            for (Ask a : s.asks.values()) { // the time away does not count against a question's limits
+                a.startedAt += away;
+                if (a.leaseUntil > 0) a.leaseUntil += away;
+                if (a.lastVersionAt > 0) a.lastVersionAt += away;
+            }
+            log("the player's screen is back after " + away / 1000 + " s");
+            MAIN.removeCallbacks(DELAY_WATCH);
+            MAIN.postDelayed(DELAY_WATCH, DELAY_WATCH_MS);
+            evaluateSelection(s);
+            Selected sel = s.selected;
+            Ask a = sel != null ? s.asks.get(sel.address) : null;
+            if (a != null) poll(s, a);
+            if (s.drawing != null) {
+                tick(s);
+                MAIN.removeCallbacks(WATCHDOG);
+                MAIN.postDelayed(WATCHDOG, WATCHDOG_MS);
+            }
+            if (s.firstLines != null) { // a version that came while away: at the next gap in Stremio's lines, or soon
+                MAIN.removeCallbacks(FIRST_DEADLINE);
+                MAIN.postDelayed(FIRST_DEADLINE, 2000);
+            }
+        } catch (Throwable t) {
+            fail("comeBack", t);
+        }
+    }
+
     /**
      * Watches Stremio's subtitle delay while one of the addon's subtitles is selected. A change is sent ONCE, when the
      * viewer has finished: the delay control closes (fewer views are on screen than at his first press — the menu went
      * away, on TV and phone alike) or the play ends. Never on every press, never after a time without presses.
      */
     private static void delayWatch(Session s) {
-        if (s == null || s != session) return;
+        if (s == null || s != session || s.away) return; // 0.7.2: started again when the player's screen comes back
         try {
             Selected sel = s.selected;
             if (sel != null && statePathFor(sel.address) != null && s.player.get() != null) {
@@ -1504,14 +1625,14 @@ public final class SubtitleRefresh {
     }
 
     private static void tickSoon(Session s) {
-        if (s == null || s != session || s.drawing == null) return;
+        if (s == null || s != session || s.drawing == null || s.away) return;
         MAIN.removeCallbacks(TICK);
         MAIN.post(TICK);
     }
 
     private static void tick(Session s) {
         MAIN.removeCallbacks(TICK);
-        if (s == null || s != session || s.drawing == null) return;
+        if (s == null || s != session || s.drawing == null || s.away) return; // 0.7.2: no drawing loop in the background
         try {
             Object p = s.player.get();
             View v = subtitleViewOf(s);
@@ -1599,7 +1720,7 @@ public final class SubtitleRefresh {
     /** The tick must have run recently while we draw; if the main loop lost it, draw again or step aside. */
     private static void watchdog() {
         Session s = session;
-        if (s == null || s.drawing == null) return;
+        if (s == null || s.drawing == null || s.away) return;
         long late = SystemClock.uptimeMillis() - s.lastTickAt;
         if (late > 5000) {
             release(s, "the drawing stalled for " + late + " ms", true);
@@ -1657,6 +1778,7 @@ public final class SubtitleRefresh {
     // ---------------------------------------------------------------- Stremio's subtitle delay (read only)
 
     private static WeakReference<Object> textRendererRef = new WeakReference<>(null);
+    private static long textRendererMissAt = -100000;
 
     /**
      * Stremio keeps the subtitle delay in its own text renderer (1.11.3: getRenderOffsetMs; 1.12.0: the one long of the
@@ -1668,8 +1790,11 @@ public final class SubtitleRefresh {
         try {
             Object r = textRendererRef.get();
             if (r == null) {
+                // 0.7.2: a search that found nothing is not run again for a while (it walks the player's objects)
+                if (SystemClock.uptimeMillis() - textRendererMissAt < 10000) return 0;
                 r = M3.findTextRenderer(p);
                 if (r == null) {
+                    textRendererMissAt = SystemClock.uptimeMillis();
                     s.report.delayReadable = false;
                     return 0;
                 }
@@ -1742,6 +1867,7 @@ public final class SubtitleRefresh {
         }
         if (session == s) session = null;
         textRendererRef = new WeakReference<>(null);
+        textRendererMissAt = -100000;
         sendReport(s);
         log("session " + s.gen + " ended: " + why);
     }

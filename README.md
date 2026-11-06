@@ -120,7 +120,7 @@ The patches work in Stremio's ExoPlayer player, which the Android TV app uses. O
 `read:packages` (`GITHUB_ACTOR` / `GITHUB_TOKEN`, for the Morphe Gradle plugin) and an Android SDK; the script header lists
 the rest.
 
-Tested on Android TV 1.12.1 (0.7.0: the notice in the addon's style and the viewer's own timing too), 1.12.0 (0.6.0) and 1.11.3 and the phone app 2.5.1 (0.7.1) and 2.4.0, on an Android 11 phone. Later releases are
+Tested on Android TV 1.12.1 (0.7.0: the notice in the addon's style and the viewer's own timing too), 1.12.0 (0.6.0) and 1.11.3 and the phone app 2.5.1 (0.7.1, 0.7.2) and 2.4.0, on an Android 11 phone. Later releases are
 patched by structure, not by name, so they will probably patch too; a release whose Media3 changed shape fails the patch.
 
 `test/test-addon.js` is a stand-in for the addon with no real data: one generated test movie (clock burned in) and three

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.2
+- Nothing runs in the background any more. Stremio keeps its player (paused) when the viewer goes to another app, so a
+  play's session went on behind the other app: questions held at the addon, new versions downloaded and swapped in, and
+  the drawing, delay and watchdog timers on the main thread, for as long as Stremio stayed in memory. Now the session
+  waits while the player's screen is stopped: no new question is sent and no timer runs (a question already on its way
+  may still finish; what it brings is drawn, with its notice, when the screen comes back). A delay adjustment not sent yet is sent
+  once when the screen goes away. When the viewer comes back the session goes on where it was: the time away does not
+  count against a question's limits, the subtitle on screen is asked about at once, and the drawing starts again. A
+  player screen closed for good ends the session.
+- A search for Stremio's subtitle delay that found nothing is not run again for 10 s (it walks the player's objects).
+- Tested on a phone with Stremio for Android TV 1.12.1 (the Clone and the Replacement) and Stremio for phones 2.5.1:
+  every earlier check, plus leaving for another app for 70 s mid-play (no question sent while away; on return the
+  version made meanwhile is fetched at once).
+
 ## 0.7.1
 - The viewer's own timing on Stremio for phones: its subtitle menu is a bottom sheet in a window of its own, so neither the
   remote's BACK nor a change of views reached the patch, and the delay was sent only when the viewer left the player. The
