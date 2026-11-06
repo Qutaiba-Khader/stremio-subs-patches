@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (not released yet: device test pending)
+## 0.7.0
 - The viewer's own timing: while one of the addon's subtitles is selected, Stremio's subtitle delay is watched; when the
   viewer has finished adjusting it — the delay control closes (fewer views on screen than at the first press) or the play
   ends — the delay is sent ONCE to the addon (`POST <base>/patch/v1/delay`), never on every press. The addon's answer may
@@ -15,8 +15,8 @@
   every call passed on unchanged, nothing consumed. The "fewer views on screen" signal stays for apps with views of
   their own; the end of the play and another subtitle picked still send a change not yet sent.
 - Stremio's delay is read rounded to the millisecond (it is kept in microseconds). Stremio itself holds +1.0 s from ten 0.1 s steps as 999 ms; that is what it applies, and what the patch reports.
-- A50 regression (Stremio TV 1.12.1): A–E unchanged, F (the notice in the addon's style) and G (the viewer's own timing)
-  new — see the addon repo's tools/a50/regress.
+- Tested on a phone running Stremio for Android TV 1.12.1: version swaps, notices, right-to-left lines and the delay as
+  before; the notice in the addon's style; the delay sent once on BACK, the corrected version drawn with no double shift.
 
 ## 0.6.0
 - Stremio for Android TV 1.12.0 is supported. 1.12.0 shrinks and renames Media3 with R8 (`Player`, `MediaItem`, `Cue`,

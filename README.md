@@ -1,6 +1,6 @@
 # Stremio Subs Patches
 
-[Morphe](https://morphe.software) patches for **Stremio for Android TV 1.12.0** (and 1.11.3) and **Stremio for Android phones 2.4.0**
+[Morphe](https://morphe.software) patches for **Stremio for Android TV 1.12.1** (and 1.12.0, 1.11.3) and **Stremio for Android phones 2.4.0**
 (both `com.stremio.one`, the manual-install APKs from [stremio.com/downloads](https://www.stremio.com/downloads)), made for a SubSense-based subtitle addon whose
 entries can still be "processing" when they are picked.
 
@@ -120,7 +120,7 @@ The patches work in Stremio's ExoPlayer player, which the Android TV app uses. O
 `read:packages` (`GITHUB_ACTOR` / `GITHUB_TOKEN`, for the Morphe Gradle plugin) and an Android SDK; the script header lists
 the rest.
 
-Tested on Android TV 1.12.0 (0.6.0) and 1.11.3 and the phone app 2.4.0, on an Android 11 phone. Later releases are
+Tested on Android TV 1.12.1 (0.7.0: the notice in the addon's style and the viewer's own timing too), 1.12.0 (0.6.0) and 1.11.3 and the phone app 2.4.0, on an Android 11 phone. Later releases are
 patched by structure, not by name, so they will probably patch too; a release whose Media3 changed shape fails the patch.
 
 `test/test-addon.js` is a stand-in for the addon with no real data: one generated test movie (clock burned in) and three
