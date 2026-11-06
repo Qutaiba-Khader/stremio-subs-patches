@@ -18,15 +18,17 @@ import java.util.List;
  * 0.7.0: the window's own callback, unchanged, with one look at the keys going by — the viewer's BACK after he changed the
  * subtitle delay closes the delay control (Stremio for Android TV draws its menus with Compose, inside the player's one
  * view, so no view of its own appears or goes away). Every call is passed on to the callback it wraps, first or after the
- * look; the look never consumes or changes an event.
+ * look; the look never consumes or changes an event. 0.7.1: also the window's focus coming back (a menu window closed).
  */
 final class KeyWatch implements Window.Callback {
     final Window.Callback in;
     private final Runnable onBack;
+    private final Runnable onFocus;
 
-    KeyWatch(Window.Callback in, Runnable onBack) {
+    KeyWatch(Window.Callback in, Runnable onBack, Runnable onFocus) {
         this.in = in;
         this.onBack = onBack;
+        this.onFocus = onFocus;
     }
 
     @Override
@@ -51,7 +53,17 @@ final class KeyWatch implements Window.Callback {
     @Override public boolean onMenuItemSelected(int featureId, MenuItem item) { return in.onMenuItemSelected(featureId, item); }
     @Override public void onWindowAttributesChanged(WindowManager.LayoutParams attrs) { in.onWindowAttributesChanged(attrs); }
     @Override public void onContentChanged() { in.onContentChanged(); }
-    @Override public void onWindowFocusChanged(boolean hasFocus) { in.onWindowFocusChanged(hasFocus); }
+    /** 0.7.1: the player's window gets the focus back = a menu drawn in a window of its own closed (Stremio for phones:
+     *  the subtitle sheet is a dialog window, so its BACK, a tap outside or a swipe down never reach this window). */
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        try {
+            if (hasFocus) onFocus.run();
+        } catch (Throwable ignored) {
+            // a look only
+        }
+        in.onWindowFocusChanged(hasFocus);
+    }
     @Override public void onAttachedToWindow() { in.onAttachedToWindow(); }
     @Override public void onDetachedFromWindow() { in.onDetachedFromWindow(); }
     @Override public void onPanelClosed(int featureId, Menu menu) { in.onPanelClosed(featureId, menu); }

@@ -80,7 +80,7 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.7.0";
+    static final String PATCH_VERSION = "0.7.1";
     /**
      * What this app can do, sent with every question: the addon never answers with something it cannot handle. `link`:
      * the question carries the address of the video that is playing (header below), and the one improving entry's own
@@ -1316,6 +1316,8 @@ public final class SubtitleRefresh {
 
     /**
      * BACK after a delay change = the viewer closes the delay control (the remote's way out of it on TV): the change is final.
+     * 0.7.1: the same when the player's window gets the focus back (the phone app's subtitle sheet is a window of its own:
+     * closing it by BACK, a tap outside or a swipe gives the focus back to the player).
      * Read a moment later, so the last press is counted. Installed once on the player's window (the callback is wrapped,
      * never replaced: see KeyWatch).
      */
@@ -1345,7 +1347,7 @@ public final class SubtitleRefresh {
             android.view.Window w = act.getWindow();
             android.view.Window.Callback cb = w.getCallback();
             if (cb == null || cb instanceof KeyWatch) return;
-            w.setCallback(new KeyWatch(cb, () -> MAIN.postDelayed(BACK_PRESSED, 300)));
+            w.setCallback(new KeyWatch(cb, () -> MAIN.postDelayed(BACK_PRESSED, 300), () -> MAIN.postDelayed(BACK_PRESSED, 300)));
             log("key watch on the player's window");
         } catch (Throwable t) {
             fail("watchKeys", t);

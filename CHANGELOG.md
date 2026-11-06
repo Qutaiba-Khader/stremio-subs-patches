@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1
+- The viewer's own timing on Stremio for phones: its subtitle menu is a bottom sheet in a window of its own, so neither the
+  remote's BACK nor a change of views reached the patch, and the delay was sent only when the viewer left the player. The
+  player's window getting the focus back now counts as the menu closing too (BACK, a tap outside the sheet or a swipe
+  down all give it back): the delay is sent once, right then. Nothing else changes; on Android TV the menus stay inside
+  the player's window and BACK works as in 0.7.0.
+- Tested on a phone with Stremio for Android TV 1.12.1 (the Clone and the Replacement) and Stremio for phones 2.5.1.
+
 ## 0.7.0
 - The viewer's own timing: while one of the addon's subtitles is selected, Stremio's subtitle delay is watched; when the
   viewer has finished adjusting it — the delay control closes (fewer views on screen than at the first press) or the play
