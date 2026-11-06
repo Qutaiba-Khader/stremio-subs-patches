@@ -3,6 +3,7 @@ package app.subsense.stremio;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -11,7 +12,12 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.StyleSpan;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONArray;
@@ -74,13 +80,18 @@ import java.util.regex.Pattern;
  */
 public final class SubtitleRefresh {
     private static final String TAG = "SubsRefresh";
-    static final String PATCH_VERSION = "0.6.0";
+    static final String PATCH_VERSION = "0.7.0";
     /**
      * What this app can do, sent with every question: the addon never answers with something it cannot handle. `link`:
      * the question carries the address of the video that is playing (header below), and the one improving entry's own
      * fetch is marked `ssp=1` (this app swaps it, so the addon may answer at once with its processing file).
      */
-    static final String CAPS = "versions,follow,link";
+    /**
+     * 0.7.0: `delay` — this app reports the viewer's subtitle delay once he has finished adjusting it, and draws a version
+     * that already includes a delay (`includesDelayMs`) net of Stremio's own; `toast2` — it draws the addon's notice in the
+     * addon's style (`toastStyle`).
+     */
+    static final String CAPS = "versions,follow,link,delay,toast2";
     /** The playing video's address, sent only to the addon whose subtitle asks — never in the address, never logged. */
     static final String LINK_HEADER = "X-Subsense-Stream";
     private static final int MAX_LINK = 4096;
@@ -169,6 +180,19 @@ public final class SubtitleRefresh {
         List<?> lastStremio = Collections.emptyList();
         long lastTickAt;
         long swappedAt;
+        /** 0.7.0: the part of Stremio's delay the drawn version already includes (subtracted while drawing it). */
+        long drawBaseMs;
+        long nextIncludesMs;
+        /** The version number and included delay of the latest file of each subtitle address. */
+        final Map<String, Integer> versionOf = new HashMap<>();
+        final Map<String, Long> includesOf = new HashMap<>();
+        /** The viewer's delay adjustment: what was seen, whether a change waits to be sent, presses, views on screen then. */
+        String delayFor;
+        long delaySeen;
+        long delayFrom;
+        boolean delayPending;
+        int delayChanges;
+        int viewsAtChange;
         /** The playback speed, measured from the player's clock while it plays (Media3's own value is not read). */
         float speed = 1f;
         long speedAtMs = -1;
@@ -264,6 +288,8 @@ public final class SubtitleRefresh {
             s.report.hookPlayer = true;
             s.report.stremio = appVersion(playerView);
             M3.addListener(player, s.listener);
+            MAIN.removeCallbacks(DELAY_WATCH);
+            MAIN.postDelayed(DELAY_WATCH, DELAY_WATCH_MS);
             log("player attached (" + player.getClass().getName() + "), session " + s.gen);
             evaluateSelection(s);
         } catch (Throwable t) {
@@ -657,6 +683,7 @@ public final class SubtitleRefresh {
                 return;
             }
             a.errorDelay = RETRY_MS;
+            if (r.toastStyle != null) toastStyle = r.toastStyle;
             if (r.plan != null) {
                 s.report.plan = r.plan;
                 s.report.planOrigin = a.origin;
@@ -670,6 +697,8 @@ public final class SubtitleRefresh {
                 return;
             }
             if ("stop".equals(r.op)) {
+                // 0.7.0: the addon's "finished" notice, for the subtitle on screen
+                if (r.toastGiven && !r.toast.isEmpty() && s.selected != null && a.address.equals(s.selected.address)) showToast(s, r.toast);
                 s.asks.remove(a.address);
                 if (a.generic) {
                     s.settled.add(a.address);
@@ -684,6 +713,8 @@ public final class SubtitleRefresh {
                 if (r.version > 0) a.have = r.version;
                 a.lastVersionAt = SystemClock.elapsedRealtime();
                 s.files.put(a.address, r.lines);
+                s.versionOf.put(a.address, r.version);
+                s.includesOf.put(a.address, r.includesMs);
                 // more may follow: keep asking (the promise expires after nextBy); otherwise this is the last version
                 boolean more = r.more && r.version > 0 && ++a.versions < MAX_VERSIONS;
                 if (more) {
@@ -708,6 +739,7 @@ public final class SubtitleRefresh {
                         s.nextGapMs = gap;
                         s.nextMaxWaitMs = maxWait;
                         s.nextToast = toast;
+                        s.nextIncludesMs = r.includesMs;
                         s.nextAsk = a;
                         s.nextVersion = r.version;
                         s.nextRepliedAt = r.repliedAt;
@@ -763,6 +795,9 @@ public final class SubtitleRefresh {
         long tookMs;
         /** When the addon said the file is ready. */
         long repliedAt;
+        /** 0.7.0: the delay this version already includes; the addon's notice style (null = not sent). */
+        long includesMs;
+        ToastStyle toastStyle;
     }
 
     /** Background thread: one question, and the file when the answer is "replace". */
@@ -820,6 +855,9 @@ public final class SubtitleRefresh {
             return r;
         }
         r.version = (int) ver;
+        r.includesMs = Math.max(-600000, Math.min(600000, j.optLong("includesDelayMs", 0)));
+        JSONObject ts = j.optJSONObject("toastStyle");
+        if (ts != null) r.toastStyle = ToastStyle.from(ts);
         r.more = j.optBoolean("more", false);
         r.nextByMs = Math.max(0, j.optLong("nextBy", 0));
         String follow = j.optString("ask", "");
@@ -1098,6 +1136,8 @@ public final class SubtitleRefresh {
     private static void startDrawing(Session s, String address, Line[] lines, String toast) {
         s.drawing = lines;
         s.drawingFor = address;
+        Long inc = s.includesOf.get(address);
+        applyBase(s, inc == null ? 0 : inc);
         s.nextLines = null;
         s.nextAsk = null;
         if (address.equals(s.firstFor)) {
@@ -1138,7 +1178,267 @@ public final class SubtitleRefresh {
         if (toast == null) return;
         View v = s.playerView.get();
         if (v != null && v.isAttachedToWindow() && v.getWindowVisibility() == View.VISIBLE) {
-            Toast.makeText(v.getContext(), toast, Toast.LENGTH_LONG).show();
+            ToastStyle st = toastStyle;
+            if (st == null) {
+                Toast.makeText(v.getContext(), toast, Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (!st.enabled) return;
+            try {
+                showOwnToast(v, toast, st);
+            } catch (Throwable t) {
+                fail("toast", t);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- 0.7.0: the addon's notice, in the addon's style
+
+    static final String TOAST_TAG = "subsense-toast";
+    private static volatile ToastStyle toastStyle;
+
+    /** What the addon sends as `toastStyle` (every value clamped here too). */
+    static final class ToastStyle {
+        boolean enabled = true;
+        int alphaPct = 50;
+        String side = "right";
+        String at = "subtitles";
+        int inMs = 120;
+        int holdMs = 2500;
+        int outMs = 250;
+        int textSp = 15;
+        int maxWidthPct = 32;
+        int marginDp = 24;
+        int cornerDp = 10;
+        int bg = 0x000000;
+        int fg = 0xFFFFFF;
+
+        static ToastStyle from(JSONObject j) {
+            ToastStyle t = new ToastStyle();
+            t.enabled = j.optBoolean("enabled", true);
+            t.alphaPct = clampInt(j.optInt("alphaPct", 50), 10, 100);
+            t.side = j.optString("side", "right");
+            t.at = j.optString("at", "subtitles");
+            t.inMs = clampInt(j.optInt("inMs", 120), 0, 2000);
+            t.holdMs = clampInt(j.optInt("holdMs", 2500), 500, 15000);
+            t.outMs = clampInt(j.optInt("outMs", 250), 0, 2000);
+            t.textSp = clampInt(j.optInt("textSp", 15), 9, 32);
+            t.maxWidthPct = clampInt(j.optInt("maxWidthPct", 32), 15, 90);
+            t.marginDp = clampInt(j.optInt("marginDp", 24), 0, 120);
+            t.cornerDp = clampInt(j.optInt("cornerDp", 10), 0, 40);
+            t.bg = rgb(j.optString("bg", "#000000"), 0x000000);
+            t.fg = rgb(j.optString("fg", "#FFFFFF"), 0xFFFFFF);
+            return t;
+        }
+
+        static int clampInt(int v, int lo, int hi) {
+            return Math.max(lo, Math.min(hi, v));
+        }
+
+        static int rgb(String s, int d) {
+            try {
+                if (s != null && s.matches("#[0-9a-fA-F]{6}")) return Integer.parseInt(s.substring(1), 16);
+            } catch (Throwable ignored) {
+                // the default below
+            }
+            return d;
+        }
+    }
+
+    /** A small box over the player: its side, at the subtitles' height (or the top), half transparent by default. */
+    private static void showOwnToast(View pv, String text, ToastStyle st) {
+        View root = pv.getRootView();
+        if (!(root instanceof FrameLayout)) {
+            Toast.makeText(pv.getContext(), text, Toast.LENGTH_LONG).show();
+            return;
+        }
+        FrameLayout g = (FrameLayout) root;
+        View old = g.findViewWithTag(TOAST_TAG);
+        if (old != null) g.removeView(old);
+        Context c = pv.getContext();
+        float dp = c.getResources().getDisplayMetrics().density;
+        TextView tv = new TextView(c);
+        tv.setTag(TOAST_TAG);
+        tv.setText(text);
+        tv.setTextColor(0xFF000000 | st.fg);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp);
+        int pad = Math.round(12 * dp);
+        tv.setPadding(pad, Math.round(7 * dp), pad, Math.round(7 * dp));
+        tv.setFocusable(false);
+        tv.setClickable(false);
+        GradientDrawable box = new GradientDrawable();
+        box.setColor((Math.round(st.alphaPct * 2.55f) << 24) | st.bg);
+        box.setCornerRadius(st.cornerDp * dp);
+        tv.setBackground(box);
+        int width = g.getWidth() > 0 ? g.getWidth() : pv.getWidth();
+        if (width > 0) tv.setMaxWidth(Math.round(width * st.maxWidthPct / 100f));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        int hg = "left".equals(st.side) ? Gravity.LEFT : "center".equals(st.side) ? Gravity.CENTER_HORIZONTAL : Gravity.RIGHT;
+        int margin = Math.round(st.marginDp * dp);
+        lp.leftMargin = margin;
+        lp.rightMargin = margin;
+        if ("top".equals(st.at)) {
+            lp.gravity = Gravity.TOP | hg;
+            lp.topMargin = margin;
+        } else {
+            // the subtitles' height: the player view's bottom on screen, less Media3's default 8 % bottom padding
+            int[] loc = new int[2];
+            pv.getLocationInWindow(loc);
+            int below = Math.max(0, g.getHeight() - (loc[1] + pv.getHeight()));
+            lp.gravity = Gravity.BOTTOM | hg;
+            lp.bottomMargin = below + Math.round(pv.getHeight() * 0.08f);
+        }
+        g.addView(tv, lp);
+        tv.setAlpha(0f);
+        tv.animate().alpha(1f).setDuration(st.inMs).start();
+        tv.postDelayed(() -> tv.animate().alpha(0f).setDuration(st.outMs).withEndAction(() -> {
+            ViewGroup parent = (ViewGroup) tv.getParent();
+            if (parent != null) parent.removeView(tv);
+        }).start(), st.inMs + st.holdMs);
+    }
+
+    // ---------------------------------------------------------------- 0.7.0: the viewer's own timing
+
+    /** The drawn version includes `includes` ms of delay: subtracted only while Stremio's delay still holds it (a device
+     *  where it was set); on a device that starts at 0 nothing is subtracted, so the correction shows there too. */
+    private static void applyBase(Session s, long includes) {
+        if (includes == 0) {
+            s.drawBaseMs = 0;
+            return;
+        }
+        long d = textDelayMs(s);
+        s.drawBaseMs = Math.abs(d - includes) <= 2 ? includes : 0;
+    }
+
+    private static final long DELAY_WATCH_MS = 400;
+    private static final Runnable DELAY_WATCH = () -> delayWatch(session);
+
+    /**
+     * Watches Stremio's subtitle delay while one of the addon's subtitles is selected. A change is sent ONCE, when the
+     * viewer has finished: the delay control closes (fewer views are on screen than at his first press — the menu went
+     * away, on TV and phone alike) or the play ends. Never on every press, never after a time without presses.
+     */
+    private static void delayWatch(Session s) {
+        if (s == null || s != session) return;
+        try {
+            Selected sel = s.selected;
+            if (sel != null && statePathFor(sel.address) != null && s.player.get() != null) {
+                long d = textDelayMs(s);
+                if (!sel.address.equals(s.delayFor)) {
+                    if (s.delayPending) sendDelay(s, "menu"); // another subtitle picked: the adjustment of the last one is final
+                    s.delayFor = sel.address;
+                    s.delaySeen = d;
+                    s.delayPending = false;
+                    s.delayChanges = 0;
+                } else if (d != s.delaySeen) {
+                    if (!s.delayPending) {
+                        s.delayPending = true;
+                        s.delayFrom = s.delaySeen;
+                        s.viewsAtChange = visibleViews(s);
+                        s.delayChanges = 0;
+                    }
+                    s.delayChanges++;
+                    s.delaySeen = d;
+                } else if (s.delayPending && visibleViews(s) < s.viewsAtChange) {
+                    sendDelay(s, "menu");
+                }
+            }
+        } catch (Throwable t) {
+            fail("delayWatch", t);
+        }
+        if (s == session) MAIN.postDelayed(DELAY_WATCH, DELAY_WATCH_MS);
+    }
+
+    /** Views shown on the player's window now (the notice itself never counts). */
+    static int visibleViews(Session s) {
+        View pv = s.playerView.get();
+        if (pv == null) return 0;
+        return countShown(pv.getRootView(), 0);
+    }
+
+    private static int countShown(View v, int depth) {
+        if (v == null || v.getVisibility() != View.VISIBLE || TOAST_TAG.equals(v.getTag()) || depth > 40) return 0;
+        int n = 1;
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount() && n < 5000; i++) n += countShown(g.getChildAt(i), depth + 1);
+        }
+        return n;
+    }
+
+    /** The viewer's adjustment, once, to the addon of the subtitle; its answer may bring the corrected version. */
+    private static void sendDelay(Session s, String trigger) {
+        s.delayPending = false;
+        final String address = s.delayFor;
+        if (address == null || s.delaySeen == s.delayFrom) return; // back where it was: nothing to report
+        String origin = originOf(address);
+        if (origin == null) return;
+        final String base = baseOf(origin, Uri.parse(address).getEncodedPath());
+        if (base == null) return;
+        boolean drawn = s.drawing != null && address.equals(s.drawingFor);
+        Integer ver = s.versionOf.get(address);
+        Object p = s.player.get();
+        final int gen = s.gen;
+        try {
+            JSONObject j = new JSONObject().put("v", PROTOCOL).put("patch", PATCH_VERSION).put("src", address)
+                    .put("have", drawn && ver != null ? ver : 0).put("delayMs", s.delaySeen).put("baseMs", drawn ? s.drawBaseMs : 0)
+                    .put("fromMs", s.delayFrom).put("changes", s.delayChanges).put("pos", p != null ? Math.max(0, M3.position(p)) : -1).put("trigger", trigger);
+            final byte[] body = j.toString().getBytes(StandardCharsets.UTF_8);
+            s.delayFrom = s.delaySeen;
+            log("delay " + s.delaySeen + " ms reported (" + trigger + ", " + s.delayChanges + " changes)");
+            NET.execute(() -> {
+                try {
+                    Response st = http("POST", base + "/patch/v1/delay", body, TIMEOUT_MS, null);
+                    if (st.code != 200) return;
+                    JSONObject a = new JSONObject(new String(st.body, StandardCharsets.UTF_8));
+                    if (!"replace".equals(a.optString("op"))) return;
+                    String file = resolveSameOrigin(origin, a.optString("file", ""));
+                    if (file == null) return;
+                    Response f = http("GET", withQuery(file, "via=refresh"), null, TIMEOUT_MS, null);
+                    if (f.code != 200) return;
+                    final Line[] lines = parseSrt(new String(f.body, StandardCharsets.UTF_8));
+                    if (lines.length == 0) return;
+                    final int version = (int) Math.max(0, Math.min(Integer.MAX_VALUE, a.optLong("version", 0)));
+                    final long includes = Math.max(-600000, Math.min(600000, a.optLong("includesDelayMs", 0)));
+                    final String toast = a.optString("toast", "");
+                    final JSONObject tsj = a.optJSONObject("toastStyle");
+                    MAIN.post(() -> onCorrected(gen, address, lines, version, includes, toast, tsj));
+                } catch (Throwable ignored) {
+                    // best effort: the correction is still kept by the addon for the next play
+                }
+            });
+        } catch (Throwable t) {
+            fail("sendDelay", t);
+        }
+    }
+
+    /** The corrected version: drawn so the screen does not move (his delay is now inside the file). */
+    private static void onCorrected(int gen, String address, Line[] lines, int version, long includes, String toast, JSONObject tsj) {
+        Session s = session;
+        if (s == null || s.gen != gen) return;
+        try {
+            if (tsj != null) toastStyle = ToastStyle.from(tsj);
+            s.files.put(address, lines);
+            s.versionOf.put(address, version);
+            s.includesOf.put(address, includes);
+            Ask a = s.asks.get(address);
+            if (a != null && version > a.have) a.have = version;
+            if (s.selected == null || !address.equals(s.selected.address)) return;
+            String t = toast == null || toast.isEmpty() ? null : toast;
+            if (s.drawing != null && address.equals(s.drawingFor)) {
+                s.nextLines = lines;
+                s.nextSince = SystemClock.uptimeMillis();
+                s.nextGapMs = 400;
+                s.nextMaxWaitMs = 8000;
+                s.nextToast = t;
+                s.nextIncludesMs = includes;
+                s.nextAsk = null;
+                tickSoon(s);
+            } else {
+                startDrawing(s, address, lines, t);
+            }
+        } catch (Throwable e) {
+            fail("onCorrected", e);
         }
     }
 
@@ -1185,12 +1485,14 @@ public final class SubtitleRefresh {
             long pos = M3.position(p);
             boolean playing = M3.playing(p);
             measureSpeed(s, pos, playing);
-            long t = pos - textDelayMs(s); // Stremio shows a line at T when position − delay = T
+            long t = pos - (textDelayMs(s) - s.drawBaseMs); // Stremio shows a line at T when position − delay = T (0.7.0: net of what the version includes)
             if (s.nextLines != null && (inGap(lines, t, s.nextGapMs) || SystemClock.uptimeMillis() - s.nextSince >= s.nextMaxWaitMs)) {
                 // a newer version: switched in while no line is on screen, so nothing jumps under the viewer's eyes
                 lines = s.nextLines;
                 s.drawing = lines;
                 s.nextLines = null;
+                applyBase(s, s.nextIncludesMs);
+                t = pos - (textDelayMs(s) - s.drawBaseMs);
                 log("upgraded the drawn subtitle at " + pos + " ms (" + lines.length + " lines)");
                 showToast(s, s.nextToast);
                 s.nextToast = null;
@@ -1378,6 +1680,12 @@ public final class SubtitleRefresh {
     }
 
     private static void endSession(Session s, String why) {
+        try {
+            if (s.delayPending) sendDelay(s, "end"); // 0.7.0: an adjustment never sent (the play ended with the menu open)
+        } catch (Throwable ignored) {
+            // best effort
+        }
+        MAIN.removeCallbacks(DELAY_WATCH);
         release(s, why, false);
         s.firstLines = null;
         MAIN.removeCallbacks(FIRST_DEADLINE);

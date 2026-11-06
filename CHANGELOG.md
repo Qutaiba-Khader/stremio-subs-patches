@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0 (not released yet: device test pending)
+- The viewer's own timing: while one of the addon's subtitles is selected, Stremio's subtitle delay is watched; when the
+  viewer has finished adjusting it — the delay control closes (fewer views on screen than at the first press) or the play
+  ends — the delay is sent ONCE to the addon (`POST <base>/patch/v1/delay`), never on every press. The addon's answer may
+  bring a corrected version that already includes the delay (`includesDelayMs`): it is drawn net of Stremio's own delay
+  where that delay is still set (no double shift, the screen does not move), and as it is on a device that starts at 0.
+- The addon's notice in the addon's style: `toastStyle` (opacity, side, height at the subtitles or the top, appear / stay /
+  fade times, text size, width, margins, corners, colours) is drawn as a small box over the player; a `stop` answer may
+  carry the notice too (the addon says it has finished). Without a style the system toast is used as before.
+- Caps `delay,toast2` announce both; an addon that does not know them answers as before.
+
 ## 0.6.0
 - Stremio for Android TV 1.12.0 is supported. 1.12.0 shrinks and renames Media3 with R8 (`Player`, `MediaItem`, `Cue`,
   `PlayerView`… get short names that change with every release), so the extension no longer names any Media3 class: it
