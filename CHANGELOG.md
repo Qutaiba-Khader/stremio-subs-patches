@@ -10,6 +10,13 @@
   fade times, text size, width, margins, corners, colours) is drawn as a small box over the player; a `stop` answer may
   carry the notice too (the addon says it has finished). Without a style the system toast is used as before.
 - Caps `delay,toast2` announce both; an addon that does not know them answers as before.
+- Stremio for Android TV draws its menus with Compose inside the player's one view, so closing the delay bar changes no
+  Android view: the patch watches the remote's BACK (it closes only the bar) through a wrapper of the window's callback —
+  every call passed on unchanged, nothing consumed. The "fewer views on screen" signal stays for apps with views of
+  their own; the end of the play and another subtitle picked still send a change not yet sent.
+- Stremio's delay is read rounded to the millisecond (it is kept in microseconds). Stremio itself holds +1.0 s from ten 0.1 s steps as 999 ms; that is what it applies, and what the patch reports.
+- A50 regression (Stremio TV 1.12.1): A–E unchanged, F (the notice in the addon's style) and G (the viewer's own timing)
+  new — see the addon repo's tools/a50/regress.
 
 ## 0.6.0
 - Stremio for Android TV 1.12.0 is supported. 1.12.0 shrinks and renames Media3 with R8 (`Player`, `MediaItem`, `Cue`,

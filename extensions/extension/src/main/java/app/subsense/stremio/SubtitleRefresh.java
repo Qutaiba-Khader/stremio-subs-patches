@@ -290,6 +290,7 @@ public final class SubtitleRefresh {
             M3.addListener(player, s.listener);
             MAIN.removeCallbacks(DELAY_WATCH);
             MAIN.postDelayed(DELAY_WATCH, DELAY_WATCH_MS);
+            watchKeys(playerView);
             log("player attached (" + player.getClass().getName() + "), session " + s.gen);
             evaluateSelection(s);
         } catch (Throwable t) {
@@ -1289,6 +1290,7 @@ public final class SubtitleRefresh {
             lp.bottomMargin = below + Math.round(pv.getHeight() * 0.08f);
         }
         g.addView(tv, lp);
+        log("notice drawn in the addon's style (" + st.side + ", " + st.at + ", " + st.alphaPct + " %, " + st.holdMs + " ms)");
         tv.setAlpha(0f);
         tv.animate().alpha(1f).setDuration(st.inMs).start();
         tv.postDelayed(() -> tv.animate().alpha(0f).setDuration(st.outMs).withEndAction(() -> {
@@ -1311,6 +1313,44 @@ public final class SubtitleRefresh {
     }
 
     private static final long DELAY_WATCH_MS = 400;
+
+    /**
+     * BACK after a delay change = the viewer closes the delay control (the remote's way out of it on TV): the change is final.
+     * Read a moment later, so the last press is counted. Installed once on the player's window (the callback is wrapped,
+     * never replaced: see KeyWatch).
+     */
+    private static final Runnable BACK_PRESSED = () -> {
+        Session s = session;
+        if (s == null || !s.delayPending) return;
+        try {
+            long d = textDelayMs(s);
+            if (d != s.delaySeen) {
+                s.delaySeen = d;
+                s.delayChanges++;
+            }
+            sendDelay(s, "menu");
+        } catch (Throwable t) {
+            fail("back", t);
+        }
+    };
+
+    private static void watchKeys(View playerView) {
+        try {
+            android.app.Activity act = null;
+            for (Context c = playerView != null ? playerView.getContext() : null; c != null; c = c instanceof android.content.ContextWrapper ? ((android.content.ContextWrapper) c).getBaseContext() : null) {
+                if (c instanceof android.app.Activity) { act = (android.app.Activity) c; break; }
+                if (!(c instanceof android.content.ContextWrapper)) break;
+            }
+            if (act == null) return;
+            android.view.Window w = act.getWindow();
+            android.view.Window.Callback cb = w.getCallback();
+            if (cb == null || cb instanceof KeyWatch) return;
+            w.setCallback(new KeyWatch(cb, () -> MAIN.postDelayed(BACK_PRESSED, 300)));
+            log("key watch on the player's window");
+        } catch (Throwable t) {
+            fail("watchKeys", t);
+        }
+    }
     private static final Runnable DELAY_WATCH = () -> delayWatch(session);
 
     /**
@@ -1340,7 +1380,7 @@ public final class SubtitleRefresh {
                     s.delayChanges++;
                     s.delaySeen = d;
                 } else if (s.delayPending && visibleViews(s) < s.viewsAtChange) {
-                    sendDelay(s, "menu");
+                    sendDelay(s, "menu"); // an app whose menu is views of its own (Compose apps: the BACK key, KeyWatch)
                 }
             }
         } catch (Throwable t) {

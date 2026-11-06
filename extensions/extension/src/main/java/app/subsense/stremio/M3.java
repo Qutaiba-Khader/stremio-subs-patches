@@ -335,7 +335,7 @@ public final class M3 {
                 only = f;
             }
             if (only == null) throw new IllegalStateException("no delay in " + renderer.getClass().getName());
-            return only.getLong(renderer) / 1000;
+            return Math.round(only.getLong(renderer) / 1000.0); // µs → ms, rounded
         }
     }
 

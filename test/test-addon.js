@@ -27,6 +27,13 @@ const SILENT_AFTER = process.env.SILENT_AFTER ? Number(process.env.SILENT_AFTER)
 const NEXTBY_MS = Number(process.env.NEXTBY_S || 1800) * 1000;
 // TOAST="text": the notice the app shows on each swap (unset = "" = none, like the addon since D92)
 const TOAST = process.env.TOAST || '';
+// 0.7.0: STYLE=1 — every answer carries the addon's notice style (toastStyle) and the last version a "finished" notice
+// (FINAL_TOAST); CORRECT=1 — a delay report (POST /patch/v1/delay) is answered with a corrected version that includes it
+const STYLE = process.env.STYLE === '1';
+const FINAL_TOAST = process.env.FINAL_TOAST || 'FINISHED';
+const CORRECT = process.env.CORRECT === '1';
+const TOAST_STYLE = { v: 1, enabled: true, alphaPct: 50, side: 'right', at: 'subtitles', inMs: 120, holdMs: 2500, outMs: 250, textSp: 15, maxWidthPct: 32, marginDp: 24, cornerDp: 10, bg: '#000000', fg: '#FFFFFF' };
+const manual = new Map(); // jobId → { totalMs, n }
 const jobs = new Map(); // jobId → created (ms)
 const served = new Map(); // ONE=1: jobId → the version the one entry's fetch served (0 = processing file), like the addon (D77)
 
@@ -124,11 +131,16 @@ http.createServer((req, res) => {
                 const vs = versionsOf(job, have);
                 const fetchPending = ownCopy && had === null && vs.best;
                 if (((!vs.best && vs.more) || fetchPending) && Date.now() < until && !res.destroyed) return setTimeout(answer, 500);
-                const base = { subsense: 1, v: 1, plan: vs.plan, retryMs: 1000 };
+                const base = { subsense: 1, v: 1, plan: vs.plan, retryMs: 1000, ...(STYLE && caps.includes('toast2') ? { toastStyle: TOAST_STYLE } : {}) };
+                const mm2 = manual.get(job);
+                if (mm2 && caps.includes('delay') && 9000 + mm2.n > have) {
+                    log(`  → the corrected version ${9000 + mm2.n} (includes ${mm2.totalMs} ms)`);
+                    return json(res, { ...base, op: 'replace', file: `/sub/${job}/manual.srt`, version: 9000 + mm2.n, more: false, includesDelayMs: mm2.totalMs, toast: '', swap: { gapMs: 400, maxWaitMs: 8000 } });
+                }
                 if (vs.best) {
                     log(`  → version ${vs.best}${vs.more ? ' (more may follow)' : ' (the last)'}`);
                     return json(res, { ...base, op: 'replace', file: `/sub/${job}/${vs.best}.srt`, version: vs.best, more: vs.more, ...(vs.more ? { nextBy: NEXTBY_MS } : {}),
-                        toast: TOAST, swap: { gapMs: 400, maxWaitMs: 8000 } });
+                        toast: STYLE && !vs.more ? FINAL_TOAST : TOAST, swap: { gapMs: 400, maxWaitMs: 8000 } });
                 }
                 log(`  → ${vs.more ? 'wait' : 'stop (nothing more)'}`);
                 return json(res, vs.more ? { ...base, op: 'wait', version: have, more: true, nextBy: NEXTBY_MS } : { ...base, op: 'stop', version: have, more: false });
@@ -186,6 +198,37 @@ http.createServer((req, res) => {
             return json(res, { subsense: 1, v: 1, op: 'wait', ask: `/sub/${mm[1]}/1.state`, retryMs: 0 });
         }
         return json(res, { v: 1, op: 'stop' });
+    }
+    // 0.7.0: the viewer's own timing — logged; with CORRECT=1 answered with the version he watched moved by his total
+    if (p === '/patch/v1/delay' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (d) => { body += d; });
+        return req.on('end', () => {
+            log(`  DELAY ${body}`);
+            let b = {};
+            try { b = JSON.parse(body); } catch (_) { return json(res, { ok: false }, 400); }
+            const jm = /\/sub\/([^/?#]+)\/(?:1|manual)\.srt/.exec(String(b.src || ''));
+            if (!CORRECT || !jm || !jobs.has(jm[1])) return json(res, { ok: true, op: 'stop' });
+            const prev = manual.get(jm[1]);
+            const onManual = prev && b.have >= 9001;
+            const totalMs = (onManual ? prev.totalMs : 0) + (Number(b.delayMs) - Number(b.baseMs || 0));
+            const n = (prev ? prev.n : 0) + 1;
+            manual.set(jm[1], { totalMs, n });
+            log(`  → corrected version ${9000 + n}: total ${totalMs} ms`);
+            return json(res, { ok: true, op: 'replace', file: `/sub/${jm[1]}/manual.srt`, version: 9000 + n, more: false, includesDelayMs: totalMs, swap: { gapMs: 400, maxWaitMs: 8000 },
+                toast: STYLE ? 'SAVED' : '', ...(STYLE ? { toastStyle: TOAST_STYLE } : {}) });
+        });
+    }
+    if ((m = p.match(/^\/sub\/([^/]+)\/manual\.srt$/)) && manual.has(m[1])) {
+        const { totalMs } = manual.get(m[1]);
+        // the last version's lines, every line moved by his total (a line's text still names its ORIGINAL start time)
+        const body = finished(VERSIONS.length, 'مصحح').replace(/(\d\d:\d\d:\d\d,\d\d\d) --> (\d\d:\d\d:\d\d,\d\d\d)/g, (_, a, b2) => {
+            const ms = (t) => { const [h, mi, rest] = t.split(':'); const [sec, f] = rest.split(','); return ((+h * 60 + +mi) * 60 + +sec) * 1000 + +f; };
+            return `${srtTime(Math.max(0, ms(a) + totalMs))} --> ${srtTime(Math.max(1, ms(b2) + totalMs))}`;
+        });
+        res.writeHead(200, { 'Content-Type': 'application/x-subrip; charset=utf-8', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+        log(`  → the corrected file (${totalMs} ms)`);
+        return res.end(body);
     }
     if (p === '/patch/v1/report' && req.method === 'POST') {
         let body = '';
