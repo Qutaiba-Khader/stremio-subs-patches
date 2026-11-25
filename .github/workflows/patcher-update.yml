@@ -90,7 +90,13 @@ jobs:
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew --no-daemon :patches:build
+        # GitHub Packages (the Morphe registry) sometimes fails to answer: three tries before giving up
+        run: |
+          for try in 1 2 3; do
+            ./gradlew --no-daemon :patches:build && exit 0
+            [ $try -lt 3 ] && { echo "::warning::build try $try failed, trying again in 60 s"; sleep 60; }
+          done
+          exit 1
 
       - name: Patch the current Stremio apps
         if: steps.v.outputs.changed == 'true' || inputs.check == true
@@ -102,8 +108,10 @@ jobs:
         if: always() && (steps.v.outputs.changed == 'true' || inputs.check == true)
         uses: actions/upload-artifact@v4
         with:
-          name: stremio-check-logs
-          path: build/stremio-check/*.log
+          name: stremio-check
+          path: |
+            build/stremio-check/*.log
+            patches/build/libs/*.mpp
           if-no-files-found: ignore
 
       - name: Publish the release
