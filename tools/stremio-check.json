@@ -1,0 +1,35 @@
+{
+  "bundle_name": "Stremio Subs Patches",
+  "apps": [
+    {
+      "name": "Stremio TV Clone",
+      "feed": "android_tv",
+      "arch": "armeabi-v7a",
+      "sources": [
+        {"bundle": "self", "include": ["Subtitle auto-refresh", "Right-to-left subtitle lines", "Test app name"]},
+        {"bundle": "github:MorpheApp/morphe-patches", "include": ["Clone app"]}
+      ],
+      "args": ["-OpackageName=com.stremio.one.subs"],
+      "after": ["Disable Play Store updates"]
+    },
+    {
+      "name": "Stremio TV Replacement",
+      "feed": "android_tv",
+      "arch": "armeabi-v7a",
+      "sources": [
+        {"bundle": "self", "include": ["Subtitle auto-refresh", "Right-to-left subtitle lines"]}
+      ]
+    },
+    {
+      "name": "Stremio Phone Clone",
+      "feed": "android",
+      "arch": "arm64-v8a",
+      "sources": [
+        {"bundle": "self", "include": ["Subtitle auto-refresh", "Right-to-left subtitle lines", "Test app name"]},
+        {"bundle": "github:MorpheApp/morphe-patches", "include": ["Clone app"]}
+      ],
+      "args": ["-OpackageName=com.stremio.one.subs.phone"],
+      "after": ["Disable Play Store updates"]
+    }
+  ]
+}

@@ -129,3 +129,4 @@ node_modules/
 .idea/
 local.properties
 test/patchtest.mp4
+__pycache__/

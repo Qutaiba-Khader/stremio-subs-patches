@@ -1,0 +1,126 @@
+name: Morphe Patcher update
+
+# Every day: is the last release of these patches built on the newest Morphe Patcher (the one the newest Morphe CLI is
+# built with, tools/morphe_versions.py)? If not, build them on it, patch the current Stremio apps with them exactly as
+# morphe-builder does (tools/stremio_check.py), and publish a new patch release only when every patch applied with no
+# warning. morphe-builder then builds the apps from that release by itself.
+# Anything failing publishes nothing: the last release stays in use, and the owner's host watcher
+# pushes an alert for a failed or missing run.
+# By hand: "Run workflow" on any branch tests that branch with Stremio; only main with "release" on publishes.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a release when everything passes (main only)
+        type: boolean
+        default: true
+      check:
+        description: Test with Stremio even when nothing new is due
+        type: boolean
+        default: false
+
+concurrency:
+  group: patcher-update-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Newest Morphe versions
+        id: v
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/morphe_versions.py --apply --github-output "$GITHUB_OUTPUT"
+
+      - name: Nothing new
+        if: steps.v.outputs.changed != 'true' && inputs.check != true
+        run: echo "Nothing new — the last release is built on ${{ steps.v.outputs.target }}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Next version
+        id: next
+        if: steps.v.outputs.changed == 'true'
+        env:
+          TARGET: ${{ steps.v.outputs.target }}
+          RELEASED: ${{ steps.v.outputs.released }}
+          CLI: ${{ steps.v.outputs.cli }}
+        run: |
+          old=$(sed -n 's/^version = //p' gradle.properties)
+          IFS=. read -r a b c <<<"$old"
+          new="$a.$b.$((c + 1))"
+          sed -i "s/^version = .*/version = $new/" gradle.properties
+          python3 - "$new" <<'PY'
+          import os, sys
+          from datetime import date
+          new = sys.argv[1]
+          path = "CHANGELOG.md"
+          text = open(path).read()
+          head, sep, rest = text.partition("\n## ")
+          entry = (f"## {new} — {date.today().isoformat()}\n"
+                   f"- Built on the newest Morphe versions (automatic): {os.environ['TARGET']} (Morphe CLI {os.environ['CLI']}).\n"
+                   f"  Before: {os.environ['RELEASED']}. No change to the patches themselves.\n"
+                   f"- Tested before release on the current Stremio apps, patched as morphe-builder does: every patch applied,\n"
+                   f"  with no warning about an older Morphe Patcher.\n\n")
+          open(path, "w").write(head.rstrip("\n") + "\n\n" + entry + ("## " + rest if sep else ""))
+          PY
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "Release due: $old → $new on $TARGET (was $RELEASED)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Unit tests
+        if: steps.v.outputs.changed == 'true' || inputs.check == true
+        run: if [ -f tools/unit-test.sh ]; then bash tools/unit-test.sh; else echo "no unit tests in this repository"; fi
+
+      - name: Build the bundle
+        if: steps.v.outputs.changed == 'true' || inputs.check == true
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew --no-daemon :patches:build
+
+      - name: Patch the current Stremio apps
+        if: steps.v.outputs.changed == 'true' || inputs.check == true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/stremio_check.py
+
+      - name: Keep the logs
+        if: always() && (steps.v.outputs.changed == 'true' || inputs.check == true)
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-check-logs
+          path: build/stremio-check/*.log
+          if-no-files-found: ignore
+
+      - name: Publish the release
+        if: >-
+          steps.v.outputs.changed == 'true' && github.ref == 'refs/heads/main' &&
+          (github.event_name == 'schedule' || inputs.release == true)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW: ${{ steps.next.outputs.version }}
+          PATCHER: ${{ steps.v.outputs.patcher }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gradle.properties CHANGELOG.md gradle/libs.versions.toml settings.gradle.kts
+          git commit -qm "$NEW: built on Morphe Patcher $PATCHER (automatic)"
+          git tag "v$NEW"
+          git push origin HEAD:main "v$NEW"
+          gh release create "v$NEW" "patches/build/libs/patches-$NEW.mpp" \
+            --title "v$NEW" --notes-file CHANGELOG.md --verify-tag
+          echo "Published v$NEW." >> "$GITHUB_STEP_SUMMARY"
