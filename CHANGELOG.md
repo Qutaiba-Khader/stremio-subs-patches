@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4 — 2026-11-26
+- Built on the newest Morphe versions (automatic): patcher 2.6.0, smali 5a5249e22f, plugin 2.1.2 (Morphe CLI 2.4.0).
+  Before: patcher 2.5.0, smali 5eaff5a2c9, plugin 2.1.2. No change to the patches themselves.
+- Tested before release on the current Stremio apps, patched as morphe-builder does: every patch applied,
+  with no warning about an older Morphe Patcher.
+
 ## 0.7.3 — 2026-11-25
 - Built on the newest Morphe versions (automatic): patcher 2.5.0, smali 5eaff5a2c9, plugin 2.1.2 (Morphe CLI 2.3.0).
   Before: patcher 1.11.0, smali d856bad65f, plugin 1.3.4. No change to the patches themselves.
